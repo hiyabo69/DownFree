@@ -120,7 +120,9 @@ internal class DownloadEngine(
             downloadTodus(request, urls.first(), partial, gate)
             if (destination.exists()) destination.delete()
             check(partial.renameTo(destination)) { "No se pudo mover el archivo descargado" }
-            repository.exportCompletedFile(destination, selectedPath)
+            val publishedUri = repository.publishCompletedFile(destination, selectedPath)
+            update(request.fileName) { it.copy(publicUri = publishedUri.toString()) }
+            destination.delete()
             return
         }
 
@@ -159,7 +161,9 @@ internal class DownloadEngine(
         if (request.method !in setOf("cocmed", "m", "moodle", "evea", "ts", "pv_ts")) removeInjectedPng(assembling)
         if (destination.exists()) destination.delete()
         check(assembling.renameTo(destination)) { "No se pudo guardar el archivo final" }
-        repository.exportCompletedFile(destination, selectedPath)
+        val publishedUri = repository.publishCompletedFile(destination, selectedPath)
+        update(request.fileName) { it.copy(publicUri = publishedUri.toString()) }
+        destination.delete()
         partFiles.forEach(File::delete)
         update(request.fileName) { it.copy(downloadedBytes = request.size, speedBytesPerSecond = 0.0) }
     }

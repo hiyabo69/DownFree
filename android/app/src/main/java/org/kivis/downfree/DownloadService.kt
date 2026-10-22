@@ -64,7 +64,7 @@ class DownloadService : Service() {
 
     fun getSelectedFileUri(name: String): android.net.Uri? = runCatching {
         val selected = getSharedPreferences("downfree", MODE_PRIVATE).getString("selected_path", null)
-        repository.getTreeFileUri(name, selected)
+        repository.getDownloadUri(name, selected)
     }.getOrNull()
     fun pauseDownload(name: String) = engine.pause(name)
     fun resumeDownload(name: String) = engine.resume(name)

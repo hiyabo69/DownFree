@@ -118,7 +118,6 @@ class MainActivity : ComponentActivity() {
                 service = downloadService,
                 onOpenFile = ::openDownloadedFile,
                 onShowMessage = ::toast,
-                onRequestAllFiles = ::requestAllFilesAccess,
                 onRequestBatteryExemption = ::requestBatteryExemption,
             )
         }
@@ -137,17 +136,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestLegacyCompatibleStorageAccess() {
-        if (Build.VERSION.SDK_INT < 30) {
+        if (Build.VERSION.SDK_INT < 29) {
             val missing = arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE, Manifest.permission.WRITE_EXTERNAL_STORAGE)
                 .filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
             if (missing.isNotEmpty()) requestPermissions(missing.toTypedArray(), 11)
-        }
-    }
-
-    private fun requestAllFilesAccess() {
-        if (Build.VERSION.SDK_INT >= 30 && !android.os.Environment.isExternalStorageManager()) {
-            runCatching { startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:$packageName"))) }
-                .onFailure { startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)) }
         }
     }
 
@@ -218,7 +210,6 @@ private fun DownFreeApp(
     service: DownloadService?,
     onOpenFile: (String) -> Unit,
     onShowMessage: (String) -> Unit,
-    onRequestAllFiles: () -> Unit,
     onRequestBatteryExemption: () -> Unit,
 ) {
     var url by remember { mutableStateOf("") }
@@ -243,9 +234,7 @@ private fun DownFreeApp(
 
     LaunchedEffect(service) {
         service?.loadConfiguration { path, theme ->
-            selectedPath = path.ifBlank {
-                (context.getExternalFilesDir(android.os.Environment.DIRECTORY_DOWNLOADS) ?: context.filesDir).absolutePath
-            }
+            selectedPath = path
             dark = theme != "Light"
         }
     }
@@ -332,8 +321,8 @@ private fun DownFreeApp(
                     }
                 }
                 Text(
-                    text = if (selectedPath.isNotBlank()) "Ruta: ${displayPath(selectedPath)}" else "",
-                    modifier = Modifier.fillMaxWidth().height(if (selectedPath.isNotBlank()) 32.dp else 8.dp),
+                    text = "Ruta: ${displayPath(selectedPath)}",
+                    modifier = Modifier.fillMaxWidth().height(32.dp),
                     color = colors.secondaryText, fontSize = 11.sp, textAlign = TextAlign.Center,
                     maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )
@@ -363,9 +352,6 @@ private fun DownFreeApp(
                         HugeIcon(R.drawable.ic_huge_folder, "Seleccionar carpeta", colors.brand, 20.dp)
                         Spacer(Modifier.width(8.dp))
                         Text("Seleccionar carpeta", color = colors.brand)
-                    }
-                    TextButton(onClick = { settingsOpen = false; onRequestAllFiles() }) {
-                        Text("Acceso a todos los archivos", color = colors.brand)
                     }
                     TextButton(onClick = { settingsOpen = false; onRequestBatteryExemption() }) {
                         Text("Optimización de batería", color = colors.brand)
@@ -573,7 +559,11 @@ private fun HugeIcon(icon: Int, label: String, tint: Color, size: androidx.compo
     )
 }
 
-private fun displayPath(path: String): String = if (path.startsWith("content://")) "Carpeta seleccionada" else path
+private fun displayPath(path: String): String = when {
+    path.isBlank() -> "Download/Down_Free/Downloads"
+    path.startsWith("content://") -> "Carpeta personalizada"
+    else -> path
+}
 
 private fun formatSpeed(bytesPerSecond: Long, global: Boolean): String = when {
     global && bytesPerSecond < 1024 -> "0.00 MB/s"

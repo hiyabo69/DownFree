@@ -13,13 +13,14 @@ internal data class DownloadItem(
     val etaSeconds: Long? = null,
     val state: DownloadState = DownloadState.QUEUED,
     val error: String? = null,
+    val publicUri: String? = null,
 ) {
     val progress: Int get() = if (totalBytes <= 0) 0 else ((downloadedBytes * 100) / totalBytes).toInt().coerceIn(0, 100)
 
     fun toJson(): JSONObject = JSONObject().put("url_data", urlData).put("filename", fileName)
         .put("file_path", "/").put("display_name", fileName).put("total_size", totalBytes)
         .put("downloaded", downloadedBytes).put("speed", speedBytesPerSecond)
-        .put("state", state.name).put("error", error)
+        .put("state", state.name).put("error", error).put("public_uri", publicUri)
 
     companion object {
         fun fromJson(json: JSONObject) = DownloadItem(
@@ -27,6 +28,7 @@ internal data class DownloadItem(
             totalBytes = json.optLong("total_size"), downloadedBytes = json.optLong("downloaded"),
             state = runCatching { DownloadState.valueOf(json.optString("state", "QUEUED")) }.getOrDefault(DownloadState.QUEUED),
             error = json.optString("error").takeIf(String::isNotBlank),
+            publicUri = json.optString("public_uri").takeIf(String::isNotBlank),
         )
     }
 }
