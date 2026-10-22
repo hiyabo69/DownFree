@@ -217,7 +217,7 @@ internal class DownloadEngine(
     }
 
     private suspend fun authenticate(request: DownloadRequest) {
-        if (request.method in setOf("m", "todus", "r", "mined")) return
+        if (request.method in setOf("m", "todus")) return
         if (request.method in setOf("cocmed", "evea", "md", "ts")) {
             val body = JSONObject().put("id", request.id).toString()
             val sessionRequest = Request.Builder().url("https://downfree-hiyabo.onrender.com/session").post(body.toRequestBody(JSON_MEDIA)).build()
