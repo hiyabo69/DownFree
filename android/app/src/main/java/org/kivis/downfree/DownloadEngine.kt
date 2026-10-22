@@ -30,8 +30,13 @@ import java.io.File
 import java.io.RandomAccessFile
 import java.net.InetAddress
 import java.net.URLEncoder
+import java.security.SecureRandom
+import java.security.cert.X509Certificate
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import javax.net.ssl.SSLContext
+import javax.net.ssl.TrustManager
+import javax.net.ssl.X509TrustManager
 
 internal class DownloadEngine(
     private val repository: DownloadRepository,
@@ -47,12 +52,29 @@ internal class DownloadEngine(
     @Volatile private var maxActive = 1
     @Volatile private var selectedPath: String? = null
     private val cookieJar = MemoryCookieJar()
-    private val client = OkHttpClient.Builder().cookieJar(cookieJar)
+
+    private val trustAllManager = object : X509TrustManager {
+        override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
+        override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
+        override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
+    }
+
+    private val sslContext = SSLContext.getInstance("TLS").apply {
+        init(null, arrayOf<TrustManager>(trustAllManager), SecureRandom())
+    }
+
+    private val client = OkHttpClient.Builder()
+        .cookieJar(cookieJar)
+        .sslSocketFactory(sslContext.socketFactory, trustAllManager)
+        .hostnameVerifier { _, _ -> true }
         .dns(object : Dns {
             override fun lookup(hostname: String): List<InetAddress> =
                 if (hostname == "s3.todus.cu") listOf(InetAddress.getByName("152.207.206.86")) else Dns.SYSTEM.lookup(hostname)
         })
-        .connectTimeout(20, TimeUnit.SECONDS).readTimeout(60, TimeUnit.SECONDS).followRedirects(true).build()
+        .connectTimeout(20, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .followRedirects(true)
+        .build()
 
     suspend fun restore() {
         val config = repository.loadConfig()
@@ -130,14 +152,29 @@ internal class DownloadEngine(
         val partFiles = urls.indices.map { File(partsDir, "$safeName.part$it") }
         var lastBytes = 0L
         var lastTick = System.nanoTime()
+
         urls.forEachIndexed { index, chunk ->
             currentCoroutineContext().ensureActive()
             val part = partFiles[index]
             val expected = if (index < urls.lastIndex) partSize else (request.size - partSize * index).coerceAtLeast(0)
+            val targetUrl = chunkUrl(request, chunk)
+
+            // Resumir: Si la parte ya está descargada completamente por un intento previo, se omite
+            if (part.exists() && expected > 0 && part.length() >= expected) {
+                val done = partFiles.take(index + 1).sumOf(File::length)
+                update(request.fileName) { it.copy(downloadedBytes = done, totalBytes = request.size) }
+                return@forEachIndexed
+            }
+
             var attempt = 0
             while (true) {
                 try {
-                    transfer(request, chunkUrl(request, chunk), part, null, expected, gate) { bytes ->
+                    if (targetUrl.contains("aula.uclv.edu.cu")) {
+                        if (!isSessionActive(targetUrl, request.fileName)) {
+                            authenticate(request)
+                        }
+                    }
+                    transfer(request, targetUrl, part, null, expected, gate) { bytes ->
                         val downloaded = partFiles.take(index).sumOf(File::length) + bytes
                         val now = System.nanoTime()
                         val elapsed = (now - lastTick) / 1_000_000_000.0
@@ -192,6 +229,7 @@ internal class DownloadEngine(
         val builder = Request.Builder().url(target).header("User-Agent", USER_AGENT)
         if (rangeStart != null) builder.header("Range", "bytes=$rangeStart-")
         client.newCall(builder.build()).execute().use { response ->
+            if (response.code == 416) return
             validateResponse(response)
             val append = rangeStart != null && response.code == 206
             RandomAccessFile(file, "rw").use { output ->
@@ -213,19 +251,52 @@ internal class DownloadEngine(
 
     private suspend fun expand(request: DownloadRequest): List<String> {
         if (request.method !in setOf("cocmed", "moodle", "evea", "md", "ts", "pv_ts", "rev2", "r", "todus")) return request.urls
-        val short = request.urls.firstOrNull()?.takeIf { !it.startsWith("http") } ?: return request.urls
-        val response = client.newCall(Request.Builder().url("https://downfree-hiyabo.onrender.com/unshort/${short.trimStart('/')}").get().build()).execute().use { it.body?.string().orEmpty() }
+        val first = request.urls.firstOrNull() ?: return request.urls
+        if (first.startsWith("http://") || first.startsWith("https://")) {
+            if (!first.contains("onrender.com/unshort/")) return request.urls
+        }
+        val short = first.substringAfter("onrender.com/unshort/").trimStart('/')
+        val response = client.newCall(
+            Request.Builder()
+                .url("https://downfree-hiyabo.onrender.com/unshort/$short")
+                .header("User-Agent", USER_AGENT)
+                .get()
+                .build()
+        ).execute().use { it.body?.string().orEmpty() }
         val long = JSONObject(response).optString("enlace_largo")
         if (long.isBlank()) return request.urls
-        return runCatching { JSONArray(long).let { array -> (0 until array.length()).map(array::getString) } }.getOrElse { listOf(long) }
+        val normalizedLong = normalizeLegacyObject(long)
+        return runCatching {
+            JSONArray(normalizedLong).let { array -> (0 until array.length()).map(array::getString) }
+        }.getOrElse { listOf(long) }
     }
 
     private suspend fun authenticate(request: DownloadRequest) {
         if (request.method in setOf("m", "todus")) return
         if (request.method in setOf("cocmed", "evea", "md", "ts")) {
             val body = JSONObject().put("id", request.id).toString()
-            val sessionRequest = Request.Builder().url("https://downfree-hiyabo.onrender.com/session").post(body.toRequestBody(JSON_MEDIA)).build()
-            client.newCall(sessionRequest).execute().use { response -> check(response.isSuccessful) { "Error creando sesión: ${response.code}" } }
+            val sessionRequest = Request.Builder()
+                .url("https://downfree-hiyabo.onrender.com/session")
+                .header("Content-Type", "application/json")
+                .header("User-Agent", USER_AGENT)
+                .post(body.toRequestBody(JSON_MEDIA))
+                .build()
+            client.newCall(sessionRequest).execute().use { response ->
+                check(response.isSuccessful) { "Error creando sesión: ${response.code}" }
+                val responseText = response.body?.string().orEmpty()
+                val json = runCatching { JSONObject(responseText) }.getOrNull()
+                if (json != null) {
+                    val map = mutableMapOf<String, String>()
+                    val keys = json.keys()
+                    while (keys.hasNext()) {
+                        val key = keys.next()
+                        if (key != "error") {
+                            map[key] = json.optString(key)
+                        }
+                    }
+                    cookieJar.setGlobalCookies(map)
+                }
+            }
             return
         }
         val callMarker = "/" + '$'.toString().repeat(3) + "call" + '$'.toString().repeat(3)
@@ -238,6 +309,7 @@ internal class DownloadEngine(
         }
         val page = client.newCall(Request.Builder().url(login).header("User-Agent", USER_AGENT).get().build()).execute().use { it.body?.string().orEmpty() }
         val token = Regex("name=[\"'](?:logintoken|csrfToken)[\"'][^>]*value=[\"']([^\"']+)").find(page)?.groupValues?.get(1)
+            ?: Regex("value=[\"']([^\"']+)[\"'][^>]*name=[\"'](?:logintoken|csrfToken)[\"']").find(page)?.groupValues?.get(1)
         val fields = when (request.method) {
             "moodle" -> listOf("anchor" to "", "logintoken" to (token ?: ""), "username" to request.username, "password" to request.password, "rememberusername" to "1")
             "pv_ts" -> listOf("F_UserName" to request.username, "F_Password" to request.password)
@@ -247,6 +319,16 @@ internal class DownloadEngine(
         val form = fields.joinToString("&") { (key, value) -> "${URLEncoder.encode(key, "UTF-8")}=${URLEncoder.encode(value, "UTF-8")}" }
         client.newCall(Request.Builder().url(login).header("User-Agent", USER_AGENT).post(form.toRequestBody(FORM_MEDIA)).build()).execute().use { response ->
             check(response.isSuccessful) { "No se pudo iniciar sesión: ${response.code}" }
+        }
+    }
+
+    private fun isSessionActive(testUrl: String, fileName: String): Boolean {
+        return runCatching {
+            val req = Request.Builder().url(testUrl).header("User-Agent", USER_AGENT).head().build()
+            client.newCall(req).execute().use { it.code in 200..299 }
+        }.getOrElse {
+            update(fileName) { it.copy(error = "Error al verificar sesión. Puede que la nube esté caída en este momento.") }
+            false
         }
     }
 
@@ -283,7 +365,10 @@ internal class DownloadEngine(
     private fun chunkUrl(request: DownloadRequest, chunk: String): String = when (request.method) {
         "cocmed" -> chunk.trimEnd('/') + "/.file"
         "m", "ts", "md", "rev2", "pv_ts", "mined", "r", "moodle", "evea", "todus" -> chunk
-        else -> request.connector.split("^").let { (prefix, suffix) -> prefix + chunk + suffix }
+        else -> {
+            val parts = request.connector.split("^")
+            if (parts.size >= 2) parts[0] + chunk + parts[1] else request.connector + chunk
+        }
     }
 
     private fun validateResponse(response: okhttp3.Response) {
@@ -304,27 +389,39 @@ internal class DownloadEngine(
     }
 
     private fun removeInjectedPng(file: File) {
-        val pattern = "89 50 4e 47 0d 0a 1a 0a 00 00 00 0c 49 48 44 52 00 00 00 01 00 00 00 01 08 02 00 00 00 90 77 53 de 00 00 00 0c 49 44 41 54 78 9c 63 60 60 60 00 00 00 04 00 01 f6 17 38 55 00 00 00 00 49 45 4e 44 ae 42 60 82".split(" ").map { it.toInt(16).toByte() }.toByteArray()
+        val pattern = byteArrayOf(
+            0x89.toByte(), 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+            0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+            0x08, 0x02, 0x00, 0x00, 0x00, 0x90.toByte(), 0x77, 0x53,
+            0xde.toByte(), 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41,
+            0x54, 0x78, 0x9c.toByte(), 0x63, 0x60, 0x60, 0x60, 0x00,
+            0x00, 0x00, 0x04, 0x00, 0x01, 0xf6.toByte(), 0x17, 0x38,
+            0x55, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e,
+            0x44, 0xae.toByte(), 0x42, 0x60, 0x82.toByte()
+        )
         val temp = File(file.parentFile, file.name + ".clean")
-        file.inputStream().buffered().use { input -> temp.outputStream().buffered().use { output ->
-            var tail = ByteArray(0)
-            val buffer = ByteArray(1024 * 1024)
-            while (true) {
-                val count = input.read(buffer)
-                if (count < 0) break
-                val data = tail + buffer.copyOf(count)
-                val safeLimit = (data.size - pattern.size + 1).coerceAtLeast(0)
-                var index = 0
-                while (index < safeLimit) {
-                    if (matchesAt(data, pattern, index)) index += pattern.size else output.write(data[index++].toInt())
+        file.inputStream().buffered().use { input ->
+            temp.outputStream().buffered().use { output ->
+                var tail = ByteArray(0)
+                val buffer = ByteArray(1024 * 1024)
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    val data = tail + buffer.copyOf(count)
+                    val safeLimit = (data.size - pattern.size + 1).coerceAtLeast(0)
+                    var index = 0
+                    while (index < safeLimit) {
+                        if (matchesAt(data, pattern, index)) index += pattern.size else output.write(data[index++].toInt())
+                    }
+                    tail = data.copyOfRange(index, data.size)
                 }
-                tail = data.copyOfRange(index, data.size)
+                var index = 0
+                while (index < tail.size) {
+                    if (index + pattern.size <= tail.size && matchesAt(tail, pattern, index)) index += pattern.size else output.write(tail[index++].toInt())
+                }
             }
-            var index = 0
-            while (index < tail.size) {
-                if (index + pattern.size <= tail.size && matchesAt(tail, pattern, index)) index += pattern.size else output.write(tail[index++].toInt())
-            }
-        } }
+        }
         if (temp.exists()) {
             if (file.delete()) temp.renameTo(file) else temp.delete()
         }
@@ -349,9 +446,30 @@ internal class DownloadEngine(
     fun shutdown() { scope.cancel() }
 
     private class MemoryCookieJar : CookieJar {
-        private val cookies = ConcurrentHashMap<String, MutableList<Cookie>>()
-        override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) { this.cookies[url.host] = cookies.toMutableList() }
-        override fun loadForRequest(url: HttpUrl): List<Cookie> = cookies[url.host].orEmpty().filter { it.matches(url) }
+        private val cookiesByHost = ConcurrentHashMap<String, MutableMap<String, Cookie>>()
+        private val globalCookies = ConcurrentHashMap<String, String>()
+
+        fun setGlobalCookies(newCookies: Map<String, String>) {
+            globalCookies.putAll(newCookies)
+        }
+
+        override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
+            val hostMap = cookiesByHost.getOrPut(url.host) { ConcurrentHashMap() }
+            cookies.forEach { hostMap[it.name] = it }
+        }
+
+        override fun loadForRequest(url: HttpUrl): List<Cookie> {
+            val list = mutableListOf<Cookie>()
+            cookiesByHost[url.host]?.values?.filter { it.matches(url) }?.let(list::addAll)
+            globalCookies.forEach { (name, value) ->
+                if (list.none { it.name == name }) {
+                    runCatching {
+                        Cookie.Builder().name(name).value(value).domain(url.host).build()
+                    }.getOrNull()?.let(list::add)
+                }
+            }
+            return list
+        }
     }
 
     companion object {

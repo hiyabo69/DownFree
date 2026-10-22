@@ -25,6 +25,16 @@ class DownloadModelsTest {
     }
 
     @Test
+    fun normalizesPythonListsWithSingleQuotesForUnshortening() {
+        val pythonList = "['https://host/part0', 'https://host/part1']"
+        val normalized = normalizeLegacyObject(pythonList)
+        val jsonArray = org.json.JSONArray(normalized)
+        assertEquals(2, jsonArray.length())
+        assertEquals("https://host/part0", jsonArray.getString(0))
+        assertEquals("https://host/part1", jsonArray.getString(1))
+    }
+
+    @Test
     fun acceptsLegacySingleStringUrl() {
         assertEquals("https://example.test/file", DownloadRequest.parse(
             """{"fn":"file.bin","urls":"https://example.test/file","m":"m"}""",
