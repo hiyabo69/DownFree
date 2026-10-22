@@ -1,5 +1,6 @@
 package org.kivis.downfree
 
+import android.content.ContentValues
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
@@ -33,12 +34,41 @@ class PublicDownloadsTest {
             )?.use { cursor ->
                 assertEquals(true, cursor.moveToFirst())
                 assertEquals(name, cursor.getString(0))
-                assertEquals("${Environment.DIRECTORY_DOWNLOADS}/Down_Free/Downloads/", cursor.getString(1))
+                assertEquals("${Environment.DIRECTORY_DOWNLOADS}/Down_Free/", cursor.getString(1))
             } ?: throw AssertionError("MediaStore no devolvió el archivo publicado")
             assertEquals(published, repository.getDownloadUri(name, selectedTree = null))
         } finally {
             published?.let { context.contentResolver.delete(it, null, null) }
             source.delete()
+        }
+    }
+
+    @Test
+    fun previousDownloadsSubfolderIsMigratedToDownFreeRoot() = runBlocking {
+        assumeTrue(Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val repository = DownloadRepository(context)
+        val collection = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        val name = "downfree-legacy-path-${System.currentTimeMillis()}.txt"
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+            put(MediaStore.MediaColumns.MIME_TYPE, "text/plain")
+            put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/Down_Free/Downloads/")
+            put(MediaStore.MediaColumns.IS_PENDING, 1)
+        }
+        val oldUri = context.contentResolver.insert(collection, values) ?: throw AssertionError("No se pudo preparar la ruta antigua")
+        try {
+            context.contentResolver.openOutputStream(oldUri, "w")?.use { it.write("legacy".toByteArray()) }
+                ?: throw AssertionError("No se pudo escribir el fixture")
+            context.contentResolver.update(oldUri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
+            repository.preparePublicDownloadsFolder()
+            context.contentResolver.query(oldUri, arrayOf(MediaStore.MediaColumns.RELATIVE_PATH), null, null, null)?.use { cursor ->
+                assertEquals(true, cursor.moveToFirst())
+                assertEquals("${Environment.DIRECTORY_DOWNLOADS}/Down_Free/", cursor.getString(0))
+            } ?: throw AssertionError("No se pudo consultar la ruta migrada")
+        } finally {
+            context.contentResolver.delete(oldUri, null, null)
+            repository.removePublicFolderSeed()
         }
     }
 }

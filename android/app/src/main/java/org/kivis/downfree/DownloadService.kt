@@ -55,11 +55,23 @@ class DownloadService : Service() {
 
     fun startDownload(raw: String) { engine.enqueue(raw); acquireWakeLock() }
     fun setDownloadLimit(value: Int) = engine.setMaxActive(value)
+    fun preparePublicDownloadsFolder(onReady: (Boolean) -> Unit) {
+        serviceScope.launch {
+            onReady(runCatching { repository.preparePublicDownloadsFolder() }.isSuccess)
+        }
+    }
+
     fun updateSelectedPath(path: String?) {
         engine.setSelectedPath(path)
         getSharedPreferences("downfree", MODE_PRIVATE).edit().putString("selected_path", path).apply()
         val theme = getSharedPreferences("downfree", MODE_PRIVATE).getString("theme_mode", "Dark") ?: "Dark"
-        serviceScope.launch { repository.saveConfig(path, theme) }
+        serviceScope.launch {
+            repository.saveConfig(path, theme)
+            if (path?.startsWith("content://") == true) {
+                repository.removePublicFolderSeed()
+                repository.removeEmptyLegacyDownloadsFolder(path)
+            }
+        }
     }
 
     fun getSelectedFileUri(name: String): android.net.Uri? = runCatching {
@@ -79,6 +91,10 @@ class DownloadService : Service() {
             val theme = c.optString("theme_mode", "Dark")
             getSharedPreferences("downfree", MODE_PRIVATE).edit().putString("selected_path", path).putString("theme_mode", theme).apply()
             block(path, theme)
+            if (path.startsWith("content://")) {
+                runCatching { repository.removePublicFolderSeed() }
+                runCatching { repository.removeEmptyLegacyDownloadsFolder(path) }
+            }
         }
     }
     fun saveConfiguration(path: String?, theme: String) {

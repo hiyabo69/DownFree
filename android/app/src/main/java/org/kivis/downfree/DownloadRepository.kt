@@ -24,6 +24,86 @@ internal class DownloadRepository(private val context: Context) {
 
     private val publishedUrisFile = File(root, "published_download_uris.json")
 
+    suspend fun preparePublicDownloadsFolder() = withContext(Dispatchers.IO) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            migrateLegacyMediaStoreDownloads()
+            if (findInPublicDownloads(".nomedia") != null) return@withContext
+            val values = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, ".nomedia")
+                put(MediaStore.MediaColumns.MIME_TYPE, "application/octet-stream")
+                put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/Down_Free/")
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
+            }
+            val uri = context.contentResolver.insert(MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), values)
+                ?: error("No se pudo preparar Download/Down_Free")
+            try {
+                context.contentResolver.openOutputStream(uri, "w")?.use { } ?: error("No se pudo preparar Download/Down_Free")
+                context.contentResolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
+            } catch (failure: Throwable) {
+                context.contentResolver.delete(uri, null, null)
+                throw failure
+            }
+        } else {
+            val folder = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "Down_Free")
+            check(folder.exists() || folder.mkdirs()) { "No se pudo crear Download/Down_Free" }
+        }
+    }
+
+    suspend fun removePublicFolderSeed() = withContext(Dispatchers.IO) {
+        findInPublicDownloads(".nomedia")?.let { context.contentResolver.delete(it, null, null) }
+    }
+
+    suspend fun removeEmptyLegacyDownloadsFolder(selectedTree: String?) = withContext(Dispatchers.IO) {
+        if (selectedTree.isNullOrBlank() || !selectedTree.startsWith("content://")) return@withContext
+        migrateLegacyMediaStoreDownloads()
+        runCatching {
+            val treeUri = Uri.parse(selectedTree)
+            val tree = DocumentFile.fromTreeUri(context, treeUri) ?: return@runCatching
+            val selectedDocument = android.provider.DocumentsContract.getTreeDocumentId(treeUri).substringAfter(':').trimEnd('/')
+            val downFree = if (selectedDocument == "Down_Free" || selectedDocument.endsWith("/Down_Free")) tree else tree.findFile("Down_Free")
+                ?: return@runCatching
+            val oldSubfolder = downFree.findFile("Downloads") ?: return@runCatching
+            if (oldSubfolder.isDirectory) {
+                oldSubfolder.listFiles().filter { it.isFile }.forEach { oldFile ->
+                    val originalName = oldFile.name ?: return@forEach
+                    val targetName = uniqueDocumentName(downFree, originalName)
+                    val target = downFree.createFile(oldFile.type ?: mimeType(targetName), targetName) ?: return@forEach
+                    val copied = runCatching {
+                        val input = context.contentResolver.openInputStream(oldFile.uri) ?: error("No se pudo leer ${oldFile.name}")
+                        val output = context.contentResolver.openOutputStream(target.uri, "w") ?: error("No se pudo escribir $targetName")
+                        input.use { source -> output.use { source.copyTo(it) } }
+                    }.getOrNull()
+                    if (copied != null && (oldFile.length() <= 0 || copied == oldFile.length())) oldFile.delete() else target.delete()
+                }
+                if (oldSubfolder.listFiles().isEmpty()) oldSubfolder.delete()
+            }
+        }
+    }
+
+    private fun uniqueDocumentName(folder: DocumentFile, requested: String): String {
+        if (folder.findFile(requested) == null) return requested
+        val base = requested.substringBeforeLast('.', requested)
+        val extension = requested.substringAfterLast('.', "").takeIf { it.isNotEmpty() }?.let { ".$it" }.orEmpty()
+        var index = 2
+        var candidate: String
+        do { candidate = "$base ($index)$extension"; index++ } while (folder.findFile(candidate) != null)
+        return candidate
+    }
+
+    private fun migrateLegacyMediaStoreDownloads() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+        val collection = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        val selection = "${MediaStore.MediaColumns.RELATIVE_PATH} = ?"
+        val args = arrayOf("${Environment.DIRECTORY_DOWNLOADS}/Down_Free/Downloads/")
+        val values = ContentValues().apply { put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/Down_Free/") }
+        context.contentResolver.query(collection, arrayOf(MediaStore.MediaColumns._ID), selection, args, null)?.use { cursor ->
+            while (cursor.moveToNext()) {
+                val uri = Uri.withAppendedPath(collection, cursor.getLong(0).toString())
+                runCatching { context.contentResolver.update(uri, values, null, null) }
+            }
+        }
+    }
+
     suspend fun publishCompletedFile(source: File, selectedTree: String?): Uri? = withContext(Dispatchers.IO) {
         val published = if (selectedTree?.startsWith("content://") == true) {
             copyIntoSelectedTree(source, selectedTree)
@@ -51,18 +131,21 @@ internal class DownloadRepository(private val context: Context) {
     }
 
     private fun copyIntoSelectedTree(source: File, treeValue: String): Uri? = runCatching {
-        val tree = DocumentFile.fromTreeUri(context, Uri.parse(treeValue)) ?: return@runCatching null
-        val downFree = tree.findFile("Down_Free") ?: tree.createDirectory("Down_Free") ?: return@runCatching null
-        val downloads = downFree.findFile("Downloads") ?: downFree.createDirectory("Downloads") ?: return@runCatching null
-        downloads.findFile(source.name)?.delete()
-        val destination = downloads.createFile(mimeType(source.name), source.name) ?: return@runCatching null
+        val treeUri = Uri.parse(treeValue)
+        val tree = DocumentFile.fromTreeUri(context, treeUri) ?: return@runCatching null
+        val selectedDocument = runCatching { android.provider.DocumentsContract.getTreeDocumentId(treeUri).substringAfter(':').trimEnd('/') }.getOrDefault("")
+        val downFree = if (selectedDocument == "Down_Free" || selectedDocument.endsWith("/Down_Free")) tree
+            else tree.findFile("Down_Free") ?: tree.createDirectory("Down_Free") ?: return@runCatching null
+        downFree.findFile(source.name)?.delete()
+        val destination = downFree.createFile(mimeType(source.name), source.name) ?: return@runCatching null
         context.contentResolver.openOutputStream(destination.uri, "w")?.use { output -> source.inputStream().use { it.copyTo(output) } }
             ?: return@runCatching null
         destination.uri
     }.getOrNull()
 
     private fun publishToPublicDownloads(source: File): Uri? {
-        val relativePath = "${Environment.DIRECTORY_DOWNLOADS}/Down_Free/Downloads/"
+        findInPublicDownloads(".nomedia")?.let { context.contentResolver.delete(it, null, null) }
+        val relativePath = "${Environment.DIRECTORY_DOWNLOADS}/Down_Free/"
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val collection = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
             val existing = findInPublicDownloads(source.name)
@@ -86,7 +169,7 @@ internal class DownloadRepository(private val context: Context) {
             }
         }
 
-        val publicDir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "Down_Free/Downloads")
+        val publicDir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "Down_Free")
         if (!publicDir.exists() && !publicDir.mkdirs()) return null
         val target = File(publicDir, source.name)
         source.inputStream().use { input -> target.outputStream().use(input::copyTo) }
@@ -98,7 +181,7 @@ internal class DownloadRepository(private val context: Context) {
         val collection = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
         val projection = arrayOf(MediaStore.MediaColumns._ID)
         val selection = "${MediaStore.MediaColumns.DISPLAY_NAME} = ? AND ${MediaStore.MediaColumns.RELATIVE_PATH} = ?"
-        val args = arrayOf(fileName, "${Environment.DIRECTORY_DOWNLOADS}/Down_Free/Downloads/")
+        val args = arrayOf(fileName, "${Environment.DIRECTORY_DOWNLOADS}/Down_Free/")
         return context.contentResolver.query(collection, projection, selection, args, null)?.use { cursor ->
             if (cursor.moveToFirst()) Uri.withAppendedPath(collection, cursor.getLong(0).toString()) else null
         }
@@ -107,14 +190,17 @@ internal class DownloadRepository(private val context: Context) {
     private fun findInSelectedTree(fileName: String, selectedTree: String?): Uri? {
         if (selectedTree.isNullOrBlank() || !selectedTree.startsWith("content://")) return null
         return runCatching {
-            val tree = DocumentFile.fromTreeUri(context, Uri.parse(selectedTree)) ?: return@runCatching null
-            tree.findFile("Down_Free")?.findFile("Downloads")?.findFile(fileName)?.uri
+            val treeUri = Uri.parse(selectedTree)
+            val tree = DocumentFile.fromTreeUri(context, treeUri) ?: return@runCatching null
+            val selectedDocument = android.provider.DocumentsContract.getTreeDocumentId(treeUri).substringAfter(':').trimEnd('/')
+            val downFree = if (selectedDocument == "Down_Free" || selectedDocument.endsWith("/Down_Free")) tree else tree.findFile("Down_Free")
+            downFree?.findFile(fileName)?.uri
         }.getOrNull()
     }
 
     private fun mimeType(fileName: String): String =
         android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(File(fileName).extension.lowercase()) ?: "application/octet-stream"
-    fun downloadsDir(selectedPath: String?): File = File(stagingRoot(), "Downloads")
+    fun downloadsDir(selectedPath: String?): File = File(stagingRoot(), "Complete")
     fun partsDir(selectedPath: String?): File = File(stagingRoot(), "Parts")
 
     suspend fun loadDownloads(): List<DownloadItem> = withContext(Dispatchers.IO) {

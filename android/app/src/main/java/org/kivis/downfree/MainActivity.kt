@@ -11,14 +11,18 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
+import android.os.Environment
 import android.os.PowerManager
+import android.provider.DocumentsContract
 import android.provider.Settings
 import android.webkit.MimeTypeMap
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -91,11 +95,11 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.content.FileProvider
 import java.io.File
 import kotlin.math.max
+import kotlinx.coroutines.flow.MutableStateFlow
 
 class MainActivity : ComponentActivity() {
     private var downloadService by mutableStateOf<DownloadService?>(null)
@@ -110,8 +114,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        ensureNotificationPermission()
-        requestLegacyCompatibleStorageAccess()
         startAndBindService()
         setContent {
             DownFreeApp(
@@ -129,21 +131,8 @@ class MainActivity : ComponentActivity() {
         bound = bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
     }
 
-    private fun ensureNotificationPermission() {
-        if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 10)
-        }
-    }
-
-    private fun requestLegacyCompatibleStorageAccess() {
-        if (Build.VERSION.SDK_INT < 29) {
-            val missing = arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE, Manifest.permission.WRITE_EXTERNAL_STORAGE)
-                .filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
-            if (missing.isNotEmpty()) requestPermissions(missing.toTypedArray(), 11)
-        }
-    }
-
     private fun requestBatteryExemption() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
         val manager = getSystemService(POWER_SERVICE) as PowerManager
         if (!manager.isIgnoringBatteryOptimizations(packageName)) {
             runCatching { startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))) }
@@ -154,9 +143,11 @@ class MainActivity : ComponentActivity() {
         val root = getExternalFilesDir(android.os.Environment.DIRECTORY_DOWNLOADS) ?: filesDir
         val selected = getSharedPreferences("downfree", Context.MODE_PRIVATE).getString("selected_path", null)
         val storageRoot = selected?.takeIf { it.isNotBlank() && !it.startsWith("content://") }?.let(::File) ?: root
-        val selectedFile = File(File(storageRoot, "Down_Free/Downloads"), File(name).name)
-        val fallbackFile = File(File(root, "Down_Free/Downloads"), File(name).name)
-        val file = selectedFile.takeIf(File::exists) ?: fallbackFile
+        val fileName = File(name).name
+        val selectedFile = if (selected?.startsWith("content://") == true) null else File(File(storageRoot, "Down_Free"), fileName)
+        val publicFile = File(File(android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS), "Down_Free"), fileName)
+        val stagingFallback = File(File(root, "Down_Free/Complete"), fileName)
+        val file = selectedFile?.takeIf(File::exists) ?: publicFile.takeIf(File::exists) ?: stagingFallback
         val uri = downloadService?.getSelectedFileUri(name) ?: if (file.exists()) FileProvider.getUriForFile(this, "$packageName.files", file) else null
         if (uri == null) { toast("El archivo no existe."); return }
         val extension = File(name).extension
@@ -193,6 +184,29 @@ private data class DownFreePalette(
     val success: Color,
 )
 
+private fun publicDownloadTreeUri(): Uri = DocumentsContract.buildTreeDocumentUri(
+    "com.android.externalstorage.documents",
+    "primary:${Environment.DIRECTORY_DOWNLOADS}/Down_Free",
+)
+
+private fun continueStorageSelection(
+    context: Context,
+    selectedPath: String,
+    storagePermissionLauncher: ActivityResultLauncher<Array<String>>,
+    launchTreePicker: () -> Unit,
+) {
+    if (selectedPath.startsWith("content://")) return
+    if (Build.VERSION.SDK_INT < 29) {
+        val missing = arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE, Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            .filter { ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED }
+        if (missing.isNotEmpty()) {
+            storagePermissionLauncher.launch(missing.toTypedArray())
+            return
+        }
+    }
+    launchTreePicker()
+}
+
 private fun palette(dark: Boolean) = if (dark) DownFreePalette(
     brand = Color(0xFF00BFCB), background = Color(0xFF0A0A0D), card = Color(0xFF141419),
     input = Color(0xFF1A1A1F), inputBorder = Color(0xFF33333D), primaryText = Color.White,
@@ -218,24 +232,79 @@ private fun DownFreeApp(
     var selectedPath by remember { mutableStateOf("") }
     var infoOpen by remember { mutableStateOf(false) }
     var settingsOpen by remember { mutableStateOf(false) }
-    val items = service?.engine?.items?.collectAsState()?.value.orEmpty()
+    var configLoaded by remember { mutableStateOf(false) }
+    var startupAccessPromptStarted by remember { mutableStateOf(false) }
+    var batteryPromptAttempted by remember { mutableStateOf(false) }
+    val emptyItems = remember { MutableStateFlow<List<DownloadItem>>(emptyList()) }
+    val itemFlow = service?.engine?.items ?: emptyItems
+    val items = itemFlow.collectAsState().value
     val clipboard: ClipboardManager = LocalClipboardManager.current
     val context = LocalContext.current
     val view = LocalView.current
     val colors = palette(dark)
+    fun requestBatteryExemptionOnce() {
+        if (!batteryPromptAttempted && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            batteryPromptAttempted = true
+            onRequestBatteryExemption()
+        }
+    }
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) {
             runCatching { service?.contentResolverPlaceholder(uri) }
             selectedPath = uri.toString()
             service?.updateSelectedPath(uri.toString())
             onShowMessage("Carpeta seleccionada")
+        } else {
+            selectedPath = ""
+            service?.updateSelectedPath(null)
         }
+        requestBatteryExemptionOnce()
+    }
+    fun launchPreparedDownloadPicker() {
+        val currentService = service
+        if (currentService == null) {
+            folderPicker.launch(publicDownloadTreeUri())
+            return
+        }
+        currentService.preparePublicDownloadsFolder { prepared ->
+            if (prepared) {
+                folderPicker.launch(publicDownloadTreeUri())
+            } else {
+                onShowMessage("No se pudo crear Download/Down_Free; continuaré usando MediaStore")
+                selectedPath = ""
+                currentService.updateSelectedPath(null)
+                requestBatteryExemptionOnce()
+            }
+        }
+    }
+    val storagePermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        launchPreparedDownloadPicker()
+    }
+    fun startStorageAndBatteryFlow() {
+        if (selectedPath.startsWith("content://")) {
+            requestBatteryExemptionOnce()
+        } else {
+            continueStorageSelection(context, selectedPath, storagePermissionLauncher, ::launchPreparedDownloadPicker)
+        }
+    }
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
+        startStorageAndBatteryFlow()
     }
 
     LaunchedEffect(service) {
         service?.loadConfiguration { path, theme ->
             selectedPath = path
             dark = theme != "Light"
+            configLoaded = true
+        }
+    }
+    LaunchedEffect(configLoaded) {
+        if (!configLoaded || startupAccessPromptStarted) return@LaunchedEffect
+        startupAccessPromptStarted = true
+        if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            startStorageAndBatteryFlow()
         }
     }
     val active = items.count { it.state == DownloadState.DOWNLOADING }
@@ -348,7 +417,7 @@ private fun DownFreeApp(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("Carpeta de descarga", color = colors.secondaryText)
-                    TextButton(onClick = { settingsOpen = false; folderPicker.launch(null) }) {
+                    TextButton(onClick = { settingsOpen = false; launchPreparedDownloadPicker() }) {
                         HugeIcon(R.drawable.ic_huge_folder, "Seleccionar carpeta", colors.brand, 20.dp)
                         Spacer(Modifier.width(8.dp))
                         Text("Seleccionar carpeta", color = colors.brand)
@@ -560,8 +629,11 @@ private fun HugeIcon(icon: Int, label: String, tint: Color, size: androidx.compo
 }
 
 private fun displayPath(path: String): String = when {
-    path.isBlank() -> "Download/Down_Free/Downloads"
-    path.startsWith("content://") -> "Carpeta personalizada"
+    path.isBlank() -> "Download/Down_Free"
+    path.startsWith("content://") -> {
+        val documentId = runCatching { DocumentsContract.getTreeDocumentId(Uri.parse(path)) }.getOrDefault("")
+        if (documentId == "primary:Download" || documentId == "primary:Download/Down_Free") "Download/Down_Free" else "Carpeta personalizada"
+    }
     else -> path
 }
 
