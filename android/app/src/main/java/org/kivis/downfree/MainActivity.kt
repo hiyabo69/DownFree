@@ -141,7 +141,8 @@ class MainActivity : ComponentActivity() {
         val uri = downloadService?.getSelectedFileUri(name) ?: if (file.exists()) FileProvider.getUriForFile(this, "$packageName.files", file) else null
         if (uri == null) { toast("El archivo no existe."); return }
         val extension = File(name).extension
-        val mime = if (extension.equals("apk", true)) "application/vnd.android.package-archive" else contentResolver.getType(uri) ?: "*/*"
+        val mime = if (extension.equals("apk", true)) "application/vnd.android.package-archive"
+            else android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension.lowercase()) ?: contentResolver.getType(uri) ?: "*/*"
         if (extension.equals("apk", true) && Build.VERSION.SDK_INT >= 26 && !packageManager.canRequestPackageInstalls()) {
             startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
             toast("Autoriza la instalación de apps y vuelve a abrir el archivo.")
