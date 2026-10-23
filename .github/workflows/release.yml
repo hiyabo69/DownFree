@@ -18,6 +18,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -69,7 +70,7 @@ jobs:
           if [ "$TARGET_REPO" != "${{ github.repository }}" ] && [ -n "$TOKEN" ]; then
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
-            git remote add target "https://x-access-token:${TOKEN}@github.com/${TARGET_REPO}.git" || git remote set-url target "https://x-access-token:${TOKEN}@github.com/${TARGET_REPO}.git"
+            git remote add target "https://${TOKEN}@github.com/${TARGET_REPO}.git" || git remote set-url target "https://${TOKEN}@github.com/${TARGET_REPO}.git"
             git push target HEAD:main --force
             git push target "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}" --force
           fi
