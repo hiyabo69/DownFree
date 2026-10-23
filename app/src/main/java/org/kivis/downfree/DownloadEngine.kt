@@ -66,7 +66,14 @@ internal class DownloadEngine(
         init(null, arrayOf<TrustManager>(trustAllManager), SecureRandom())
     }
 
+    private val okDispatcher = okhttp3.Dispatcher().apply {
+        maxRequests = 64
+        maxRequestsPerHost = 32
+    }
+
     private val client = OkHttpClient.Builder()
+        .dispatcher(okDispatcher)
+        .connectionPool(okhttp3.ConnectionPool(32, 5, TimeUnit.MINUTES))
         .cookieJar(cookieJar)
         .sslSocketFactory(sslContext.socketFactory, trustAllManager)
         .hostnameVerifier { _, _ -> true }
@@ -113,16 +120,16 @@ internal class DownloadEngine(
                     }
                     if (!acquired) delay(200)
                 }
-                update(item.fileName) { it.copy(state = DownloadState.DOWNLOADING, error = null) }
+                updateAndPersist(item.fileName) { it.copy(state = DownloadState.DOWNLOADING, error = null) }
                 perform(request, gate)
-                update(item.fileName) { it.copy(state = DownloadState.COMPLETED, downloadedBytes = it.totalBytes.takeIf { total -> total > 0 } ?: it.downloadedBytes, speedBytesPerSecond = 0.0) }
+                updateAndPersist(item.fileName) { it.copy(state = DownloadState.COMPLETED, downloadedBytes = it.totalBytes.takeIf { total -> total > 0 } ?: it.downloadedBytes, speedBytesPerSecond = 0.0) }
                 repository.saveStatus(item.fileName, DownloadState.COMPLETED)
             } catch (cancelled: CancellationException) {
-                update(item.fileName) { it.copy(state = DownloadState.CANCELLED, speedBytesPerSecond = 0.0) }
+                updateAndPersist(item.fileName) { it.copy(state = DownloadState.CANCELLED, speedBytesPerSecond = 0.0) }
                 repository.saveStatus(item.fileName, DownloadState.CANCELLED)
                 throw cancelled
             } catch (failure: Throwable) {
-                update(item.fileName) { it.copy(state = DownloadState.ERROR, error = failure.message ?: "Error de descarga", speedBytesPerSecond = 0.0) }
+                updateAndPersist(item.fileName) { it.copy(state = DownloadState.ERROR, error = failure.message ?: "Error de descarga", speedBytesPerSecond = 0.0) }
                 repository.saveStatus(item.fileName, DownloadState.ERROR, failure.message)
             } finally {
                 if (acquired) synchronized(slots) { activeCount.decrementAndGet() }
@@ -146,7 +153,7 @@ internal class DownloadEngine(
             if (destination.exists()) destination.delete()
             check(partial.renameTo(destination)) { "No se pudo mover el archivo descargado" }
             val publishedUri = repository.publishCompletedFile(destination, selectedPath)
-            update(request.fileName) { it.copy(publicUri = publishedUri.toString()) }
+            updateAndPersist(request.fileName) { it.copy(publicUri = publishedUri.toString()) }
             destination.delete()
             return
         }
@@ -155,10 +162,7 @@ internal class DownloadEngine(
         val partFiles = urls.indices.map { File(partsDir, "$safeName.part$it") }
         val progressMap = ConcurrentHashMap<Int, Long>()
         val semaphore = Semaphore(4)
-        var lastBytes = 0L
-        var lastTick = System.nanoTime()
-        var smoothedSpeed = 0.0
-        var smoothedEta: Double? = null
+        val speedTracker = SpeedTracker()
 
         urls.indices.forEach { index ->
             val part = partFiles[index]
@@ -192,30 +196,13 @@ internal class DownloadEngine(
                                 transfer(request, targetUrl, part, null, expected, gate) { bytes ->
                                     progressMap[index] = bytes
                                     val downloaded = progressMap.values.sum()
-                                    val now = System.nanoTime()
-                                    val elapsed = (now - lastTick) / 1_000_000_000.0
-                                    if (elapsed > 0.1) {
-                                        val instantBps = kotlin.math.max(0.0, (downloaded - lastBytes) / elapsed)
-                                        val alphaVel = 0.1
-                                        smoothedSpeed = if (smoothedSpeed == 0.0) instantBps else (smoothedSpeed * (1 - alphaVel)) + (instantBps * alphaVel)
-                                        lastBytes = downloaded
-                                        lastTick = now
-                                    }
-                                    if (smoothedSpeed > 1024 && request.size > downloaded) {
-                                        val remaining = (request.size - downloaded).toDouble()
-                                        val instantEta = remaining / smoothedSpeed
-                                        val alphaEta = 0.1
-                                        smoothedEta = if (smoothedEta == null) instantEta else (smoothedEta!! * (1 - alphaEta)) + (instantEta * alphaEta)
-                                    } else if (downloaded >= request.size) {
-                                        smoothedSpeed = 0.0
-                                        smoothedEta = null
-                                    }
+                                    val (speed, eta) = speedTracker.update(downloaded, request.size)
                                     update(request.fileName) {
                                         it.copy(
                                             downloadedBytes = downloaded,
                                             totalBytes = request.size,
-                                            speedBytesPerSecond = smoothedSpeed,
-                                            etaSeconds = smoothedEta?.toLong(),
+                                            speedBytesPerSecond = speed,
+                                            etaSeconds = eta,
                                         )
                                     }
                                 }
@@ -239,10 +226,10 @@ internal class DownloadEngine(
         if (destination.exists()) destination.delete()
         check(assembling.renameTo(destination)) { "No se pudo guardar el archivo final" }
         val publishedUri = repository.publishCompletedFile(destination, selectedPath)
-        update(request.fileName) { it.copy(publicUri = publishedUri.toString()) }
+        updateAndPersist(request.fileName) { it.copy(publicUri = publishedUri.toString()) }
         destination.delete()
         partFiles.forEach(File::delete)
-        update(request.fileName) { it.copy(downloadedBytes = request.size, speedBytesPerSecond = 0.0) }
+        updateAndPersist(request.fileName) { it.copy(downloadedBytes = request.size, speedBytesPerSecond = 0.0) }
     }
 
     private suspend fun downloadTodus(request: DownloadRequest, url: String, file: File, gate: MutableStateFlow<Boolean>) {
@@ -255,10 +242,7 @@ internal class DownloadEngine(
             val partFiles = (0 until chunkCount).map { File(partsDir, "$safeName.todus.part$it") }
             val progressMap = ConcurrentHashMap<Int, Long>()
             val semaphore = Semaphore(4)
-            var lastBytes = 0L
-            var lastTick = System.nanoTime()
-            var smoothedSpeed = 0.0
-            var smoothedEta: Double? = null
+            val speedTracker = SpeedTracker()
 
             partFiles.forEachIndexed { i, part ->
                 if (part.exists()) progressMap[i] = part.length()
@@ -290,30 +274,13 @@ internal class DownloadEngine(
                                     transferRange(request, url, partFile, currentOffset, endByte, expectedPartSize, gate) { bytesWritten ->
                                         progressMap[index] = bytesWritten
                                         val totalDownloaded = progressMap.values.sum()
-                                        val now = System.nanoTime()
-                                        val elapsed = (now - lastTick) / 1_000_000_000.0
-                                        if (elapsed > 0.1) {
-                                            val instantBps = kotlin.math.max(0.0, (totalDownloaded - lastBytes) / elapsed)
-                                            val alphaVel = 0.1
-                                            smoothedSpeed = if (smoothedSpeed == 0.0) instantBps else (smoothedSpeed * (1 - alphaVel)) + (instantBps * alphaVel)
-                                            lastBytes = totalDownloaded
-                                            lastTick = now
-                                        }
-                                        if (smoothedSpeed > 1024 && totalSize > totalDownloaded) {
-                                            val remaining = (totalSize - totalDownloaded).toDouble()
-                                            val instantEta = remaining / smoothedSpeed
-                                            val alphaEta = 0.1
-                                            smoothedEta = if (smoothedEta == null) instantEta else (smoothedEta!! * (1 - alphaEta)) + (instantEta * alphaEta)
-                                        } else if (totalDownloaded >= totalSize) {
-                                            smoothedSpeed = 0.0
-                                            smoothedEta = null
-                                        }
+                                        val (speed, eta) = speedTracker.update(totalDownloaded, totalSize)
                                         update(request.fileName) {
                                             it.copy(
                                                 downloadedBytes = totalDownloaded,
                                                 totalBytes = totalSize,
-                                                speedBytesPerSecond = smoothedSpeed,
-                                                etaSeconds = smoothedEta?.toLong(),
+                                                speedBytesPerSecond = speed,
+                                                etaSeconds = eta,
                                             )
                                         }
                                     }
@@ -339,39 +306,19 @@ internal class DownloadEngine(
             partFiles.forEach(File::delete)
         } else {
             var attempt = 0
-            var lastBytes = file.length()
-            var lastTick = System.nanoTime()
-            var smoothedSpeed = 0.0
-            var smoothedEta: Double? = null
+            val speedTracker = SpeedTracker()
 
             while (attempt < 5) {
                 try {
                     val offset = file.length().takeIf { it > 0 }
                     transfer(request, url, file, offset, request.size, gate) { bytes ->
-                        val now = System.nanoTime()
-                        val elapsed = (now - lastTick) / 1_000_000_000.0
-                        if (elapsed > 0.1) {
-                            val instantBps = kotlin.math.max(0.0, (bytes - lastBytes) / elapsed)
-                            val alphaVel = 0.1
-                            smoothedSpeed = if (smoothedSpeed == 0.0) instantBps else (smoothedSpeed * (1 - alphaVel)) + (instantBps * alphaVel)
-                            lastBytes = bytes
-                            lastTick = now
-                        }
-                        if (smoothedSpeed > 1024 && request.size > bytes) {
-                            val remaining = (request.size - bytes).toDouble()
-                            val instantEta = remaining / smoothedSpeed
-                            val alphaEta = 0.1
-                            smoothedEta = if (smoothedEta == null) instantEta else (smoothedEta!! * (1 - alphaEta)) + (instantEta * alphaEta)
-                        } else if (bytes >= request.size) {
-                            smoothedSpeed = 0.0
-                            smoothedEta = null
-                        }
+                        val (speed, eta) = speedTracker.update(bytes, request.size)
                         update(request.fileName) {
                             it.copy(
                                 downloadedBytes = bytes,
                                 totalBytes = request.size,
-                                speedBytesPerSecond = smoothedSpeed,
-                                etaSeconds = smoothedEta?.toLong(),
+                                speedBytesPerSecond = speed,
+                                etaSeconds = eta,
                             )
                         }
                     }
@@ -381,7 +328,7 @@ internal class DownloadEngine(
                     if (failure is CancellationException) throw failure
                     attempt++
                     if (attempt >= 5) throw IllegalStateException("Error: Tras 5 intentos en la descarga de Todus", failure)
-                    update(request.fileName) { it.copy(state = DownloadState.DOWNLOADING, error = "Error en descarga Todus (intento $attempt/5): ${failure.message}") }
+                    updateAndPersist(request.fileName) { it.copy(state = DownloadState.DOWNLOADING, error = "Error en descarga Todus (intento $attempt/5): ${failure.message}") }
                     retryConnection()
                 }
             }
@@ -399,15 +346,21 @@ internal class DownloadEngine(
             RandomAccessFile(file, "rw").use { output ->
                 if (append) output.seek(output.length()) else output.setLength(0)
                 val input = response.body?.byteStream() ?: error("Respuesta vacía")
-                val buffer = ByteArray(8192)
+                val buffer = ByteArray(64 * 1024)
+                var lastReport = System.currentTimeMillis()
                 while (true) {
                     currentCoroutineContext().ensureActive()
                     gate.first { it }
                     val count = input.read(buffer)
                     if (count < 0) break
                     output.write(buffer, 0, count)
-                    progress(output.length())
+                    val now = System.currentTimeMillis()
+                    if (now - lastReport >= 250) {
+                        lastReport = now
+                        progress(output.length())
+                    }
                 }
+                progress(output.length())
             }
         }
         check(expected <= 0 || file.length() >= expected) { "Descarga de rango incompleta" }
@@ -424,15 +377,21 @@ internal class DownloadEngine(
             RandomAccessFile(file, "rw").use { output ->
                 if (append) output.seek(output.length()) else output.setLength(0)
                 val input = response.body?.byteStream() ?: error("Respuesta vacía")
-                val buffer = ByteArray(8192)
+                val buffer = ByteArray(64 * 1024)
+                var lastReport = System.currentTimeMillis()
                 while (true) {
                     currentCoroutineContext().ensureActive()
                     gate.first { it }
                     val count = input.read(buffer)
                     if (count < 0) break
                     output.write(buffer, 0, count)
-                    progress(output.length())
+                    val now = System.currentTimeMillis()
+                    if (now - lastReport >= 250) {
+                        lastReport = now
+                        progress(output.length())
+                    }
                 }
+                progress(output.length())
             }
         }
         check(expected <= 0 || file.length() >= expected) { "Descarga incompleta" }
@@ -516,7 +475,7 @@ internal class DownloadEngine(
             val req = Request.Builder().url(testUrl).header("User-Agent", USER_AGENT).head().build()
             client.newCall(req).execute().use { it.code in 200..299 }
         }.getOrElse {
-            update(fileName) { it.copy(error = "Error al verificar sesión. Puede que la nube esté caída en este momento.") }
+            updateAndPersist(fileName) { it.copy(error = "Error al verificar sesión. Puede que la nube esté caída en este momento.") }
             false
         }
     }
@@ -547,7 +506,7 @@ internal class DownloadEngine(
         if (start != null) builder.header("Range", "bytes=$start-${end ?: ""}")
         client.newCall(builder.build()).execute().use { response ->
             validateResponse(response)
-            response.body?.byteStream()?.use { it.copyTo(output, 8192) } ?: error("Respuesta vacía")
+            response.body?.byteStream()?.use { it.copyTo(output, 64 * 1024) } ?: error("Respuesta vacía")
         }
     }
 
@@ -619,8 +578,8 @@ internal class DownloadEngine(
     private fun matchesAt(source: ByteArray, pattern: ByteArray, offset: Int): Boolean =
         offset + pattern.size <= source.size && pattern.indices.all { source[offset + it] == pattern[it] }
 
-    fun pause(fileName: String) { pauseGates[fileName]?.value = false; update(fileName) { it.copy(state = DownloadState.PAUSED, speedBytesPerSecond = 0.0) } }
-    fun resume(fileName: String) { pauseGates[fileName]?.value = true; update(fileName) { it.copy(state = DownloadState.DOWNLOADING) } }
+    fun pause(fileName: String) { pauseGates[fileName]?.value = false; updateAndPersist(fileName) { it.copy(state = DownloadState.PAUSED, speedBytesPerSecond = 0.0) } }
+    fun resume(fileName: String) { pauseGates[fileName]?.value = true; updateAndPersist(fileName) { it.copy(state = DownloadState.DOWNLOADING) } }
     fun pauseAll() = itemsState.value.filter { it.state == DownloadState.DOWNLOADING }.forEach { pause(it.fileName) }
     fun resumeAll() = itemsState.value.filter { it.state == DownloadState.PAUSED }.forEach { resume(it.fileName) }
     suspend fun cancel(fileName: String) { jobs.remove(fileName)?.cancelAndJoin(); repository.removeStatus(fileName); itemsState.value = itemsState.value.filterNot { it.fileName == fileName }; persist() }
@@ -629,10 +588,45 @@ internal class DownloadEngine(
     private fun update(fileName: String, transform: (DownloadItem) -> DownloadItem) {
         itemsState.value = itemsState.value.map { if (it.fileName == fileName) transform(it) else it }
         itemsState.value.firstOrNull { it.fileName == fileName }?.let(onNotification)
+    }
+
+    private fun updateAndPersist(fileName: String, transform: (DownloadItem) -> DownloadItem) {
+        update(fileName, transform)
         persist()
     }
+
     private fun persist() { scope.launch { repository.saveDownloads(itemsState.value) } }
     fun shutdown() { scope.cancel() }
+
+    private class SpeedTracker {
+        private var lastBytes = 0L
+        private var lastTick = System.nanoTime()
+        var smoothedSpeed = 0.0
+            private set
+        var smoothedEta: Long? = null
+            private set
+
+        @Synchronized
+        fun update(downloaded: Long, totalSize: Long): Pair<Double, Long?> {
+            val now = System.nanoTime()
+            val elapsed = (now - lastTick) / 1_000_000_000.0
+            if (elapsed >= 0.2) {
+                val instantBps = kotlin.math.max(0.0, (downloaded - lastBytes) / elapsed)
+                val alphaVel = 0.15
+                smoothedSpeed = if (smoothedSpeed == 0.0) instantBps else (smoothedSpeed * (1 - alphaVel)) + (instantBps * alphaVel)
+                lastBytes = downloaded
+                lastTick = now
+
+                if (smoothedSpeed > 1024 && totalSize > downloaded) {
+                    val remaining = (totalSize - downloaded).toDouble()
+                    smoothedEta = (remaining / smoothedSpeed).toLong()
+                } else {
+                    smoothedEta = null
+                }
+            }
+            return Pair(smoothedSpeed, smoothedEta)
+        }
+    }
 
     private class MemoryCookieJar : CookieJar {
         private val cookiesByHost = ConcurrentHashMap<String, MutableMap<String, Cookie>>()

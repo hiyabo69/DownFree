@@ -419,7 +419,7 @@ private fun DownFreeApp(
         AlertDialog(
             onDismissRequest = { infoOpen = false },
             containerColor = colors.card,
-            title = { Text("Down Free v7.8.8", color = colors.primaryText, fontWeight = FontWeight.SemiBold) },
+            title = { Text("Down Free v1.0.0", color = colors.primaryText, fontWeight = FontWeight.SemiBold) },
             text = { Text("Gestor de descargas para uso sin consumo de megas. Perteneciente al servicio Uploader Free. Para más información, visita nuestro canal de Telegram @UploaderFreeChannel.", color = colors.secondaryText) },
             confirmButton = { TextButton(onClick = { infoOpen = false }) { Text("CERRAR", color = colors.brand) } },
         )

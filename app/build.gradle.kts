@@ -12,8 +12,8 @@ android {
         applicationId = "com.hiyabo.downfree"
         minSdk = 26
         targetSdk = 35
-        versionCode = 788
-        versionName = "7.8.8"
+        versionCode = 1
+        versionName = "1.0.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
     }
