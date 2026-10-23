@@ -45,6 +45,19 @@ jobs:
           TAG_NAME="${GITHUB_REF_NAME}"
           cp app/build/outputs/apk/release/app-release.apk "DownFree-${TAG_NAME}.apk"
 
+      - name: Resolve Target Repository
+        id: target_repo
+        env:
+          INPUT_REPO: ${{ secrets.REPO }}
+        run: |
+          if [ -z "$INPUT_REPO" ]; then
+            echo "repo=${{ github.repository }}" >> $GITHUB_OUTPUT
+          elif [[ "$INPUT_REPO" == *"/"* ]]; then
+            echo "repo=${INPUT_REPO}" >> $GITHUB_OUTPUT
+          else
+            echo "repo=${{ github.repository_owner }}/${INPUT_REPO}" >> $GITHUB_OUTPUT
+          fi
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -55,7 +68,7 @@ jobs:
             
             🎉 Nueva versión oficial lista para descargar.
           files: DownFree-${{ github.ref_name }}.apk
-          repository: ${{ secrets.REPO || github.repository }}
+          repository: ${{ steps.target_repo.outputs.repo }}
           token: ${{ secrets.TOKEN || secrets.GITHUB_TOKEN }}
         env:
           GITHUB_TOKEN: ${{ secrets.TOKEN || secrets.GITHUB_TOKEN }}
