@@ -31,7 +31,6 @@ class DownloadService : Service() {
         repository = DownloadRepository(this)
         engine = DownloadEngine(repository, ::updateNotification)
         createChannel()
-        startForeground(NOTIFICATION_ID, notification("Servicio de descargas en ejecución", 0, false))
         webServer = LocalWebServer(this, engine)
         runCatching { webServer.start() }
         serviceScope.launch { engine.restore() }
@@ -51,6 +50,16 @@ class DownloadService : Service() {
             ACTION_CLEAR -> serviceScope.launch { engine.clearCompleted() }
         }
         return START_STICKY
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        val hasWork = engine.items.value.any { it.state == DownloadState.DOWNLOADING || it.state == DownloadState.QUEUED }
+        if (!hasWork) {
+            wakeLock?.let { if (it.isHeld) it.release() }
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+        }
+        super.onTaskRemoved(rootIntent)
     }
 
     fun startDownload(raw: String) { engine.enqueue(raw); acquireWakeLock() }
@@ -108,16 +117,33 @@ class DownloadService : Service() {
     }
 
     private fun updateNotification(item: DownloadItem) {
-        val hasWork = engine.items.value.any { it.state == DownloadState.DOWNLOADING || it.state == DownloadState.QUEUED }
-        if (hasWork) acquireWakeLock() else wakeLock?.let { if (it.isHeld) it.release() }
-        val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-        val text = when (item.state) {
-            DownloadState.COMPLETED -> "${item.fileName} descargado con éxito"
-            DownloadState.ERROR -> item.error ?: "Error de descarga"
-            DownloadState.PAUSED -> "Descarga pausada"
-            else -> "${item.progress}% completado · ${formatBytes(item.speedBytesPerSecond.toLong())}/s"
+        val activeItems = engine.items.value.filter { it.state == DownloadState.DOWNLOADING || it.state == DownloadState.QUEUED }
+        val hasWork = activeItems.isNotEmpty()
+
+        if (hasWork) {
+            acquireWakeLock()
+            val activeItem = activeItems.firstOrNull { it.state == DownloadState.DOWNLOADING } ?: activeItems.first()
+            val speedText = formatBytes(activeItem.speedBytesPerSecond.toLong())
+            val text = "${activeItem.fileName}: ${activeItem.progress}% · $speedText/s"
+
+            val fgNotif = notification(text, activeItem.progress, done = false)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                runCatching { androidx.core.content.ContextCompat.startForegroundService(this, Intent(this, DownloadService::class.java)) }
+            }
+            startForeground(NOTIFICATION_ID, fgNotif)
+        } else {
+            wakeLock?.let { if (it.isHeld) it.release() }
+            stopForeground(STOP_FOREGROUND_REMOVE)
         }
-        manager.notify(item.fileName.hashCode().and(0x7fff) + 200, notification(text, item.progress, item.state !in setOf(DownloadState.DOWNLOADING, DownloadState.QUEUED)))
+
+        val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+        if (item.state == DownloadState.COMPLETED) {
+            val completedNotif = notification("${item.fileName} descargado con éxito", 100, done = true)
+            manager.notify(item.fileName.hashCode().and(0x7fff) + 200, completedNotif)
+        } else if (item.state == DownloadState.ERROR) {
+            val errorNotif = notification(item.error ?: "Error de descarga en ${item.fileName}", 0, done = true)
+            manager.notify(item.fileName.hashCode().and(0x7fff) + 200, errorNotif)
+        }
     }
 
     private fun createChannel() {
@@ -129,11 +155,26 @@ class DownloadService : Service() {
     }
 
     private fun notification(text: String, progress: Int, done: Boolean): Notification {
-        val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java).apply { flags = Intent.FLAG_ACTIVITY_SINGLE_TOP }, PendingIntent.FLAG_UPDATE_CURRENT or if (Build.VERSION.SDK_INT >= 23) PendingIntent.FLAG_IMMUTABLE else 0)
-        return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_sys_download).setContentTitle(if (done) "Down Free" else "Gestor de Descargas")
-            .setContentText(text).setContentIntent(open).setOnlyAlertOnce(true).setOngoing(!done)
-            .setProgress(100, progress, false).setPriority(NotificationCompat.PRIORITY_HIGH).build()
+        val open = PendingIntent.getActivity(
+            this, 0,
+            Intent(this, MainActivity::class.java).apply { flags = Intent.FLAG_ACTIVITY_SINGLE_TOP },
+            PendingIntent.FLAG_UPDATE_CURRENT or if (Build.VERSION.SDK_INT >= 23) PendingIntent.FLAG_IMMUTABLE else 0
+        )
+        val icon = if (done) android.R.drawable.stat_sys_download_done else android.R.drawable.stat_sys_download
+        val title = if (done) "Down Free" else "Descargando..."
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setSmallIcon(icon)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setContentIntent(open)
+            .setOnlyAlertOnce(true)
+            .setOngoing(!done)
+            .setPriority(if (done) NotificationCompat.PRIORITY_DEFAULT else NotificationCompat.PRIORITY_LOW)
+
+        if (!done) {
+            builder.setProgress(100, progress, false)
+        }
+        return builder.build()
     }
 
     override fun onDestroy() {

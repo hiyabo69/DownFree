@@ -127,7 +127,7 @@ class MainActivity : ComponentActivity() {
 
     private fun startAndBindService() {
         val intent = Intent(this, DownloadService::class.java)
-        ContextCompat.startForegroundService(this, intent)
+        runCatching { startService(intent) }
         bound = bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
     }
 
@@ -407,7 +407,7 @@ private fun DownFreeApp(
                 }
                 Text(
                     text = "Ruta: ${displayPath(selectedPath)}",
-                    modifier = Modifier.fillMaxWidth().height(32.dp),
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                     color = colors.secondaryText, fontSize = 11.sp, textAlign = TextAlign.Center,
                     maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )
@@ -458,8 +458,8 @@ private fun Header(
     onInfo: () -> Unit,
     onToggleTheme: () -> Unit,
 ) {
-    Column(Modifier.fillMaxWidth().height(70.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Row(Modifier.fillMaxWidth().height(36.dp), verticalAlignment = Alignment.CenterVertically) {
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(
                 "Descargas", modifier = Modifier.weight(1f), color = colors.primaryText,
                 fontSize = 24.sp, fontWeight = FontWeight.Bold, maxLines = 1,
@@ -473,7 +473,7 @@ private fun Header(
             animationSpec = infiniteRepeatable(tween(1600), repeatMode = RepeatMode.Reverse),
             label = "connection-indicator-alpha",
         )
-        Row(Modifier.fillMaxWidth().height(20.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(8.dp).background(Color(0xFF20E45A).copy(alpha = alpha), CircleShape))
             Spacer(Modifier.width(8.dp))
             Text("$active activas  -  $queued cola  -  $complete completas", color = colors.secondaryText, fontSize = 12.sp, maxLines = 1)
@@ -526,7 +526,7 @@ private fun DownloadInput(
 
 @Composable
 private fun GlobalStats(totalSpeed: Long, eta: String, colors: DownFreePalette) {
-    Row(Modifier.fillMaxWidth().height(24.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Text("Velocidad global", color = colors.secondaryText, fontSize = 11.sp)
         Spacer(Modifier.width(8.dp))
         Text(formatSpeed(totalSpeed, global = true), color = colors.primaryText, fontSize = 12.sp, fontWeight = FontWeight.Bold)
@@ -564,24 +564,41 @@ private fun DownloadCard(
         colors = CardDefaults.cardColors(containerColor = colors.card),
         shape = RoundedCornerShape(12.dp),
         border = BorderStroke(1.dp, colors.buttonBorder.copy(alpha = .45f)),
-        modifier = Modifier.fillMaxWidth().height(110.dp)
+        modifier = Modifier
+            .fillMaxWidth()
             .clickable(enabled = item.state == DownloadState.COMPLETED, onClick = onOpen),
     ) {
         Column(
-            Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 7.dp),
-            verticalArrangement = Arrangement.spacedBy(2.dp),
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            Row(Modifier.fillMaxWidth().height(18.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(item.fileName, Modifier.weight(1f), color = colors.primaryText, fontSize = 14.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    when (item.state) { DownloadState.ERROR -> "Error"; DownloadState.COMPLETED -> "100%"; else -> "${item.progress}%" },
+                    text = item.fileName,
+                    modifier = Modifier.weight(1f),
+                    color = colors.primaryText,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = when (item.state) {
+                        DownloadState.ERROR -> "Error"
+                        DownloadState.COMPLETED -> "100%"
+                        else -> "${item.progress}%"
+                    },
                     color = if (item.state == DownloadState.ERROR) colors.danger else colors.primaryText,
-                    fontSize = 14.sp, fontWeight = FontWeight.Bold,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
                 )
             }
-            Row(Modifier.fillMaxWidth().height(14.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    item.error ?: when (item.state) {
+                    text = item.error ?: when (item.state) {
                         DownloadState.QUEUED -> "Pendiente..."
                         DownloadState.DOWNLOADING -> "Descargando..."
                         DownloadState.PAUSED -> "Pausado"
@@ -589,29 +606,55 @@ private fun DownloadCard(
                         DownloadState.ERROR -> "Error en descarga"
                         DownloadState.CANCELLED -> "Cancelada"
                     },
-                    Modifier.weight(1f), color = colors.secondaryText, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                    color = colors.secondaryText,
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
-                Text(if (item.state == DownloadState.COMPLETED) "Completa" else "ETA ${formatDuration(item.etaSeconds)}", color = colors.secondaryText, fontSize = 11.sp)
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = if (item.state == DownloadState.COMPLETED) "Completa" else "ETA ${formatDuration(item.etaSeconds)}",
+                    color = colors.secondaryText,
+                    fontSize = 11.sp,
+                )
             }
             LinearProgressIndicator(
-                progress = { item.progress / 100f }, modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)),
-                color = colors.brand, trackColor = colors.button,
+                progress = { item.progress / 100f },
+                modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)),
+                color = colors.brand,
+                trackColor = colors.button,
             )
-            Row(Modifier.fillMaxWidth().height(14.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 val totalText = if (item.totalBytes > 0) formatBytes(item.totalBytes) else "0 MB"
                 val currentText = if (item.totalBytes > 0) formatBytes(item.downloadedBytes) else "0 MB"
-                Text("$currentText / $totalText", Modifier.weight(1f), color = colors.secondaryText, fontSize = 11.sp, maxLines = 1)
-                Text(formatSpeed(item.speedBytesPerSecond.toLong(), global = false), color = colors.secondaryText, fontSize = 11.sp)
+                Text(
+                    text = "$currentText / $totalText",
+                    modifier = Modifier.weight(1f),
+                    color = colors.secondaryText,
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = formatSpeed(item.speedBytesPerSecond.toLong(), global = false),
+                    color = colors.secondaryText,
+                    fontSize = 11.sp,
+                )
             }
-            Row(Modifier.fillMaxWidth().height(22.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(
+                Modifier.fillMaxWidth().padding(top = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
                 when (item.state) {
                     DownloadState.DOWNLOADING, DownloadState.QUEUED -> CardAction("Pausar", R.drawable.ic_huge_pause, colors.secondaryText, onPause)
                     DownloadState.PAUSED -> CardAction("Reanudar", R.drawable.ic_huge_play, colors.brand, onResume)
                     DownloadState.ERROR -> CardAction("Reintentar", R.drawable.ic_huge_retry, colors.success, onRetry)
+                    DownloadState.COMPLETED -> CardAction("Abrir", R.drawable.ic_huge_file, colors.brand, onOpen)
                     else -> Unit
                 }
-                if (item.state != DownloadState.COMPLETED) CardAction("Eliminar", R.drawable.ic_huge_delete, colors.danger, onCancel)
-                Spacer(Modifier.weight(1f))
+                CardAction("Eliminar", R.drawable.ic_huge_delete, colors.danger, onCancel)
             }
         }
     }
