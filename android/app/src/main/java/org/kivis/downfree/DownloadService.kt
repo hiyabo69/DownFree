@@ -32,7 +32,7 @@ class DownloadService : Service() {
         engine = DownloadEngine(repository, ::updateNotification)
         createChannel()
         startForeground(NOTIFICATION_ID, notification("Servicio de descargas en ejecución", 0, false))
-        webServer = LocalWebServer(engine)
+        webServer = LocalWebServer(this, engine)
         runCatching { webServer.start() }
         serviceScope.launch { engine.restore() }
     }

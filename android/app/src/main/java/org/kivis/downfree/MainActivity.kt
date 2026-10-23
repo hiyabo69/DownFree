@@ -310,9 +310,25 @@ private fun DownFreeApp(
     val active = items.count { it.state == DownloadState.DOWNLOADING }
     val queued = items.count { it.state == DownloadState.QUEUED }
     val complete = items.count { it.state == DownloadState.COMPLETED }
-    val totalSpeed = items.sumOf { it.speedBytesPerSecond.toLong() }
+    val totalSpeed = items.filter { it.state == DownloadState.DOWNLOADING }.sumOf { it.speedBytesPerSecond.toLong() }
     val totalRemaining = items.filter { it.state == DownloadState.DOWNLOADING }.sumOf { (it.totalBytes - it.downloadedBytes).coerceAtLeast(0) }
-    val eta = if (totalSpeed > 1024) formatDuration(totalRemaining / totalSpeed) else "--"
+    var smoothSpeed by remember { mutableStateOf(0.0) }
+    var smoothEtaSeconds by remember { mutableStateOf<Double?>(null) }
+    LaunchedEffect(totalSpeed, totalRemaining) {
+        val alphaVel = 0.1
+        smoothSpeed = (smoothSpeed * (1 - alphaVel)) + (totalSpeed * alphaVel)
+        if (smoothSpeed > 1024 && totalRemaining > 0) {
+            val instantEta = totalRemaining / smoothSpeed
+            val alphaEta = 0.08
+            smoothEtaSeconds = if (smoothEtaSeconds == null) instantEta else (smoothEtaSeconds!! * (1 - alphaEta)) + (instantEta * alphaEta)
+        } else {
+            if (smoothSpeed <= 50) {
+                smoothSpeed = 0.0
+                smoothEtaSeconds = null
+            }
+        }
+    }
+    val eta = smoothEtaSeconds?.let { formatDuration(it.toLong()) } ?: "--"
 
     SideEffect {
         (context as? Activity)?.window?.let { window ->
@@ -359,7 +375,7 @@ private fun DownFreeApp(
                             .onFailure { onShowMessage(it.message ?: "Metadatos de descarga no válidos") }
                     },
                 )
-                GlobalStats(totalSpeed, eta, colors)
+                GlobalStats(smoothSpeed.toLong(), eta, colors)
                 Row(
                     Modifier.fillMaxWidth().height(48.dp).horizontalScroll(rememberScrollState()),
                     verticalAlignment = Alignment.CenterVertically,

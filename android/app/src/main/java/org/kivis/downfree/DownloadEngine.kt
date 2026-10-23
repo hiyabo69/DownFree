@@ -152,6 +152,8 @@ internal class DownloadEngine(
         val partFiles = urls.indices.map { File(partsDir, "$safeName.part$it") }
         var lastBytes = 0L
         var lastTick = System.nanoTime()
+        var smoothedSpeed = 0.0
+        var smoothedEta: Double? = null
 
         urls.forEachIndexed { index, chunk ->
             currentCoroutineContext().ensureActive()
@@ -178,16 +180,37 @@ internal class DownloadEngine(
                         val downloaded = partFiles.take(index).sumOf(File::length) + bytes
                         val now = System.nanoTime()
                         val elapsed = (now - lastTick) / 1_000_000_000.0
-                        val speed = if (elapsed > .1) (downloaded - lastBytes).coerceAtLeast(0) / elapsed else 0.0
-                        if (elapsed > .5) { lastBytes = downloaded; lastTick = now }
-                        update(request.fileName) { it.copy(downloadedBytes = downloaded, totalBytes = request.size, speedBytesPerSecond = speed, etaSeconds = if (speed > 1024) ((request.size - downloaded).coerceAtLeast(0) / speed).toLong() else null) }
+                        if (elapsed > 0.1) {
+                            val instantBps = kotlin.math.max(0.0, (downloaded - lastBytes) / elapsed)
+                            val alphaVel = 0.1
+                            smoothedSpeed = if (smoothedSpeed == 0.0) instantBps else (smoothedSpeed * (1 - alphaVel)) + (instantBps * alphaVel)
+                            lastBytes = downloaded
+                            lastTick = now
+                        }
+                        if (smoothedSpeed > 1024 && request.size > downloaded) {
+                            val remaining = (request.size - downloaded).toDouble()
+                            val instantEta = remaining / smoothedSpeed
+                            val alphaEta = 0.1
+                            smoothedEta = if (smoothedEta == null) instantEta else (smoothedEta!! * (1 - alphaEta)) + (instantEta * alphaEta)
+                        } else if (downloaded >= request.size) {
+                            smoothedSpeed = 0.0
+                            smoothedEta = null
+                        }
+                        update(request.fileName) {
+                            it.copy(
+                                downloadedBytes = downloaded,
+                                totalBytes = request.size,
+                                speedBytesPerSecond = smoothedSpeed,
+                                etaSeconds = smoothedEta?.toLong(),
+                            )
+                        }
                     }
                     check(expected <= 0 || part.length() >= expected) { "Parte incompleta o corrupta" }
                     break
                 } catch (failure: Throwable) {
                     if (failure is CancellationException) throw failure
                     attempt++
-                    if (attempt >= 5) throw failure
+                    if (attempt >= 5) throw IllegalStateException("Error: Tras 5 intentos en la descarga", failure)
                     update(request.fileName) { it.copy(state = DownloadState.DOWNLOADING, error = "Conexión perdida. Reintentando ($attempt/5): ${failure.message}") }
                     retryConnection()
                 }
@@ -207,18 +230,49 @@ internal class DownloadEngine(
 
     private suspend fun downloadTodus(request: DownloadRequest, url: String, file: File, gate: MutableStateFlow<Boolean>) {
         var attempt = 0
+        var lastBytes = file.length()
+        var lastTick = System.nanoTime()
+        var smoothedSpeed = 0.0
+        var smoothedEta: Double? = null
+
         while (attempt < 5) {
             try {
                 val offset = file.length().takeIf { it > 0 }
                 transfer(request, url, file, offset, request.size, gate) { bytes ->
-                    update(request.fileName) { it.copy(downloadedBytes = bytes, totalBytes = request.size) }
+                    val now = System.nanoTime()
+                    val elapsed = (now - lastTick) / 1_000_000_000.0
+                    if (elapsed > 0.1) {
+                        val instantBps = kotlin.math.max(0.0, (bytes - lastBytes) / elapsed)
+                        val alphaVel = 0.1
+                        smoothedSpeed = if (smoothedSpeed == 0.0) instantBps else (smoothedSpeed * (1 - alphaVel)) + (instantBps * alphaVel)
+                        lastBytes = bytes
+                        lastTick = now
+                    }
+                    if (smoothedSpeed > 1024 && request.size > bytes) {
+                        val remaining = (request.size - bytes).toDouble()
+                        val instantEta = remaining / smoothedSpeed
+                        val alphaEta = 0.1
+                        smoothedEta = if (smoothedEta == null) instantEta else (smoothedEta!! * (1 - alphaEta)) + (instantEta * alphaEta)
+                    } else if (bytes >= request.size) {
+                        smoothedSpeed = 0.0
+                        smoothedEta = null
+                    }
+                    update(request.fileName) {
+                        it.copy(
+                            downloadedBytes = bytes,
+                            totalBytes = request.size,
+                            speedBytesPerSecond = smoothedSpeed,
+                            etaSeconds = smoothedEta?.toLong(),
+                        )
+                    }
                 }
                 check(request.size <= 0 || file.length() >= request.size) { "Descarga Todus incompleta" }
                 return
             } catch (failure: Throwable) {
                 if (failure is CancellationException) throw failure
                 attempt++
-                if (attempt >= 5) throw failure
+                if (attempt >= 5) throw IllegalStateException("Error: Tras 5 intentos en la descarga de Todus", failure)
+                update(request.fileName) { it.copy(state = DownloadState.DOWNLOADING, error = "Error en descarga Todus (intento $attempt/5): ${failure.message}") }
                 retryConnection()
             }
         }
