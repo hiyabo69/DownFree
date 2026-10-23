@@ -1,0 +1,61 @@
+name: Build and Release Android App
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-release:
+    name: Build & Publish Release APK
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Decode Keystore
+        env:
+          ENCODED_KEY: ${{ secrets.KEY }}
+        run: |
+          echo "$ENCODED_KEY" | base64 -d > app/release.keystore
+
+      - name: Build Release APK
+        env:
+          KEYSTORE_FILE: release.keystore
+          KEYSTORE_PASSWORD: ${{ secrets.PASSWORD }}
+          KEYSTORE_ALIAS: ${{ secrets.ALIAS }}
+        run: ./gradlew assembleRelease --no-daemon
+
+      - name: Prepare APK Artifact
+        run: |
+          TAG_NAME="${GITHUB_REF_NAME}"
+          cp app/build/outputs/apk/release/app-release.apk "DownFree-${TAG_NAME}.apk"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Down Free ${{ github.ref_name }}
+          body: |
+            ## Down Free ${{ github.ref_name }}
+            
+            🎉 Nueva versión oficial lista para descargar.
+          files: DownFree-${{ github.ref_name }}.apk
+          repository: ${{ secrets.REPO || github.repository }}
+          token: ${{ secrets.TOKEN || secrets.GITHUB_TOKEN }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.TOKEN || secrets.GITHUB_TOKEN }}
