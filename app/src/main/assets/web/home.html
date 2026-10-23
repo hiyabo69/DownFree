@@ -1,0 +1,291 @@
+
+    <!DOCTYPE html>
+    <html lang="es">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Down Free VPN - Descarga Libre y Segura</title>
+        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+        <style>
+            /* Modern CSS Reset and Base Styles */
+            * {
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }
+
+            body {
+                font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                line-height: 1.6;
+                color: #1f2937;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                min-height: 100vh;
+                position: relative;
+            }
+
+            body::before {
+                content: '';
+                position: absolute;
+                top: 0;
+                left: 0;
+                right: 0;
+                bottom: 0;
+                background: rgba(255, 255, 255, 0.1);
+                backdrop-filter: blur(10px);
+                z-index: -1;
+            }
+
+            .container {
+                max-width: 1200px;
+                margin: 0 auto;
+                padding: 2rem;
+                position: relative;
+                z-index: 1;
+            }
+
+            /* Header Section */
+            .header {
+                text-align: center;
+                margin-bottom: 4rem;
+                background: rgba(255, 255, 255, 0.95);
+                padding: 3rem 2rem;
+                border-radius: 20px;
+                box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+                backdrop-filter: blur(10px);
+            }
+
+            .header h1 {
+                font-size: 3.5rem;
+                font-weight: 700;
+                background: linear-gradient(135deg, #667eea, #764ba2);
+                -webkit-background-clip: text;
+                -webkit-text-fill-color: transparent;
+                background-clip: text;
+                margin-bottom: 1rem;
+                line-height: 1.2;
+            }
+
+            .header p {
+                font-size: 1.25rem;
+                color: #6b7280;
+                max-width: 600px;
+                margin: 0 auto;
+                font-weight: 400;
+            }
+
+            /* Features Section */
+            .features-section {
+                margin-bottom: 4rem;
+            }
+
+            .features-section h2 {
+                font-size: 2.5rem;
+                font-weight: 600;
+                text-align: center;
+                margin-bottom: 3rem;
+                color: white;
+                text-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+            }
+
+            .features-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+                gap: 2rem;
+                margin-bottom: 3rem;
+            }
+
+            .feature-card {
+                background: rgba(255, 255, 255, 0.95);
+                padding: 2.5rem;
+                border-radius: 16px;
+                box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+                transition: all 0.3s ease;
+                backdrop-filter: blur(10px);
+                border: 1px solid rgba(255, 255, 255, 0.2);
+            }
+
+            .feature-card:hover {
+                transform: translateY(-8px);
+                box-shadow: 0 20px 40px rgba(0, 0, 0, 0.15);
+            }
+
+            .feature-icon {
+                width: 60px;
+                height: 60px;
+                background: linear-gradient(135deg, #667eea, #764ba2);
+                border-radius: 12px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                margin-bottom: 1.5rem;
+                font-size: 1.5rem;
+                color: white;
+            }
+
+            .feature-card h3 {
+                font-size: 1.5rem;
+                font-weight: 600;
+                margin-bottom: 1rem;
+                color: #1f2937;
+            }
+
+            .feature-card p {
+                color: #6b7280;
+                font-size: 1rem;
+                line-height: 1.6;
+            }
+
+            /* Contact Section */
+            .contact-section {
+                background: rgba(255, 255, 255, 0.95);
+                padding: 3rem;
+                border-radius: 20px;
+                box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+                text-align: center;
+                margin-bottom: 3rem;
+                backdrop-filter: blur(10px);
+            }
+
+            .contact-section h2 {
+                font-size: 2.5rem;
+                font-weight: 600;
+                margin-bottom: 1.5rem;
+                color: #1f2937;
+            }
+
+            .contact-section p {
+                font-size: 1.125rem;
+                color: #6b7280;
+                margin-bottom: 2rem;
+                max-width: 600px;
+                margin-left: auto;
+                margin-right: auto;
+            }
+
+            .contact-link {
+                display: inline-block;
+                background: linear-gradient(135deg, #667eea, #764ba2);
+                color: white;
+                padding: 1rem 2rem;
+                border-radius: 12px;
+                text-decoration: none;
+                font-weight: 500;
+                transition: all 0.3s ease;
+                box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+            }
+
+            .contact-link:hover {
+                transform: translateY(-2px);
+                box-shadow: 0 8px 25px rgba(102, 126, 234, 0.6);
+            }
+
+            /* Navigation Links */
+            .nav-links {
+                display: flex;
+                justify-content: center;
+                gap: 2rem;
+                flex-wrap: wrap;
+            }
+
+            .nav-link {
+                display: inline-block;
+                background: rgba(255, 255, 255, 0.95);
+                color: #1f2937;
+                padding: 1rem 2rem;
+                border-radius: 12px;
+                text-decoration: none;
+                font-weight: 500;
+                transition: all 0.3s ease;
+                box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+                backdrop-filter: blur(10px);
+                border: 1px solid rgba(255, 255, 255, 0.2);
+            }
+
+            .nav-link:hover {
+                transform: translateY(-2px);
+                box-shadow: 0 8px 25px rgba(0, 0, 0, 0.15);
+                background: white;
+            }
+
+            /* Responsive Design */
+            @media (max-width: 768px) {
+                .container {
+                    padding: 1rem;
+                }
+
+                .header h1 {
+                    font-size: 2.5rem;
+                }
+
+                .header p {
+                    font-size: 1.125rem;
+                }
+
+                .features-section h2 {
+                    font-size: 2rem;
+                }
+
+                .contact-section h2 {
+                    font-size: 2rem;
+                }
+
+                .nav-links {
+                    flex-direction: column;
+                    align-items: center;
+                }
+
+                .nav-link {
+                    width: 100%;
+                    max-width: 300px;
+                    text-align: center;
+                }
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <!-- Header Section -->
+            <div class="header">
+                <h1>Down Free VPN</h1>
+                <p>Acceso libre y seguro a descargas sin consumo de datos a través de nuestro bot especializado</p>
+            </div>
+
+            <!-- Features Section -->
+            <div class="features-section">
+                <h2>Características Principales</h2>
+                <div class="features-grid">
+                    <div class="feature-card">
+                        <div class="feature-icon">🔒</div>
+                        <h3>Descargas Seguras</h3>
+                        <p>Descarga ficheros de manera segura y rápida sin comprometer tu privacidad ni consumir tus datos móviles</p>
+                    </div>
+
+                    <div class="feature-card">
+                        <div class="feature-icon">📺</div>
+                        <h3>Streaming Online</h3>
+                        <p>Visualiza videos de manera online sin interrupciones y con la mejor calidad disponible</p>
+                    </div>
+
+                    <div class="feature-card">
+                        <div class="feature-icon">🎨</div>
+                        <h3>Temas Personalizables</h3>
+                        <p>Múltiples temas y diseños que se van agregando constantemente para personalizar tu experiencia</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Contact Section -->
+            <div class="contact-section">
+                <h2>Soporte Técnico</h2>
+                <p>¿Necesitas ayuda para contratar el servicio o tienes alguna duda? Nuestro equipo está aquí para ayudarte</p>
+                <a href="{DEVELOPER_CONTACT}" class="contact-link">Contactar Soporte</a>
+            </div>
+
+            <!-- Navigation Links -->
+            <div class="nav-links">
+                <a href="/settings" class="nav-link">⚙️ Configuración</a>
+                <a href="/generate" class="nav-link">🔗 Generar Enlaces</a>
+            </div>
+        </div>
+    </body>
+    </html>

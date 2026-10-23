@@ -1,0 +1,229 @@
+
+    <!DOCTYPE html>
+    <html lang="es">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Generar Enlaces - Down Free VPN</title>
+        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+        <style>
+            /* Modern styling for generate page */
+            * {
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }
+
+            body {
+                font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                min-height: 100vh;
+                padding: 20px;
+                line-height: 1.6;
+            }
+
+            .container {
+                max-width: 800px;
+                margin: 0 auto;
+                background: rgba(255, 255, 255, 0.95);
+                backdrop-filter: blur(10px);
+                border-radius: 20px;
+                box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+                overflow: hidden;
+            }
+
+            .header {
+                background: linear-gradient(135deg, #2d3748 0%, #4a5568 100%);
+                color: white;
+                padding: 40px;
+                text-align: center;
+            }
+
+            .header h1 {
+                font-size: 2.5rem;
+                font-weight: 700;
+                margin-bottom: 10px;
+            }
+
+            .header p {
+                font-size: 1.1rem;
+                opacity: 0.9;
+                font-weight: 300;
+            }
+
+            .form-container {
+                padding: 40px;
+            }
+
+            .form-group {
+                margin-bottom: 30px;
+            }
+
+            label {
+                display: block;
+                font-weight: 600;
+                color: #2d3748;
+                margin-bottom: 10px;
+                font-size: 1.1rem;
+            }
+
+            textarea {
+                width: 100%;
+                padding: 20px;
+                border: 2px solid #e2e8f0;
+                border-radius: 12px;
+                font-family: 'Monaco', 'Menlo', monospace;
+                font-size: 14px;
+                background: #f8fafc;
+                transition: all 0.3s ease;
+                resize: vertical;
+                min-height: 200px;
+            }
+
+            textarea:focus {
+                outline: none;
+                border-color: #667eea;
+                background: white;
+                box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+            }
+
+            .submit-btn {
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+                border: none;
+                padding: 15px 40px;
+                border-radius: 12px;
+                font-size: 1.1rem;
+                font-weight: 600;
+                cursor: pointer;
+                transition: all 0.3s ease;
+                width: 100%;
+                margin-bottom: 20px;
+            }
+
+            .submit-btn:hover {
+                transform: translateY(-2px);
+                box-shadow: 0 10px 25px rgba(102, 126, 234, 0.3);
+            }
+
+            .error-message {
+                background: #fed7d7;
+                color: #c53030;
+                padding: 15px;
+                border-radius: 12px;
+                margin: 20px 0;
+                border-left: 4px solid #e53e3e;
+            }
+
+            .success-section {
+                background: #f0fff4;
+                border: 2px solid #9ae6b4;
+                border-radius: 12px;
+                padding: 25px;
+                margin: 20px 0;
+            }
+
+            .success-section h2 {
+                color: #22543d;
+                font-size: 1.3rem;
+                margin-bottom: 15px;
+                display: flex;
+                align-items: center;
+            }
+
+            .success-section h2:before {
+                content: "✓";
+                background: #48bb78;
+                color: white;
+                width: 24px;
+                height: 24px;
+                border-radius: 50%;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                margin-right: 10px;
+                font-size: 14px;
+            }
+
+            .link-container {
+                background: white;
+                padding: 15px;
+                border-radius: 8px;
+                border: 1px solid #c6f6d5;
+                word-break: break-all;
+            }
+
+            .link-container a {
+                color: #2b6cb0;
+                text-decoration: none;
+                font-weight: 500;
+            }
+
+            .link-container a:hover {
+                text-decoration: underline;
+            }
+
+            .navigation {
+                display: flex;
+                gap: 15px;
+                justify-content: center;
+                margin-top: 30px;
+                padding-top: 30px;
+                border-top: 1px solid #e2e8f0;
+            }
+
+            .nav-link {
+                color: #667eea;
+                text-decoration: none;
+                font-weight: 500;
+                padding: 10px 20px;
+                border-radius: 8px;
+                transition: all 0.3s ease;
+            }
+
+            .nav-link:hover {
+                background: #667eea;
+                color: white;
+                transform: translateY(-1px);
+            }
+
+            @media (max-width: 768px) {
+                .container {
+                    margin: 10px;
+                    border-radius: 15px;
+                }
+
+                .header {
+                    padding: 30px 20px;
+                }
+
+                .header h1 {
+                    font-size: 2rem;
+                }
+
+                .form-container {
+                    padding: 30px 20px;
+                }
+
+                .navigation {
+                    flex-direction: column;
+                    align-items: center;
+                }
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h1>🔗 Generador de Enlaces</h1>
+                <p>Convierte tu JSON en enlaces de descarga y streaming</p>
+            </div>
+
+            <div class="form-container">
+                <form method="post">
+                    <div class="form-group">
+                        <label for="json_input">📋 Pega tu código JSON:</label>
+                        <textarea name="json_input" id="json_input" placeholder='{"fn": "archivo.mp4", "url": "https://ejemplo.com/archivo.mp4", "key": "valor"}'></textarea>
+                    </div>
+                    <button type="submit" class="submit-btn">🚀 Generar Enlaces</button>
+                </form>
