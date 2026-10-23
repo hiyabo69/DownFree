@@ -7,6 +7,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -15,6 +16,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import okhttp3.Cookie
 import okhttp3.CookieJar
 import okhttp3.Dns
@@ -150,69 +153,83 @@ internal class DownloadEngine(
 
         val partSize = request.partSizeMb.coerceAtLeast(1).toLong() * 1024 * 1024
         val partFiles = urls.indices.map { File(partsDir, "$safeName.part$it") }
+        val progressMap = ConcurrentHashMap<Int, Long>()
+        val semaphore = Semaphore(4)
         var lastBytes = 0L
         var lastTick = System.nanoTime()
         var smoothedSpeed = 0.0
         var smoothedEta: Double? = null
 
-        urls.forEachIndexed { index, chunk ->
-            currentCoroutineContext().ensureActive()
+        urls.indices.forEach { index ->
             val part = partFiles[index]
-            val expected = if (index < urls.lastIndex) partSize else (request.size - partSize * index).coerceAtLeast(0)
-            val targetUrl = chunkUrl(request, chunk)
+            if (part.exists()) progressMap[index] = part.length()
+        }
 
-            // Resumir: Si la parte ya está descargada completamente por un intento previo, se omite
-            if (part.exists() && expected > 0 && part.length() >= expected) {
-                val done = partFiles.take(index + 1).sumOf(File::length)
-                update(request.fileName) { it.copy(downloadedBytes = done, totalBytes = request.size) }
-                return@forEachIndexed
-            }
+        coroutineScope {
+            urls.forEachIndexed { index, chunk ->
+                launch(Dispatchers.IO) {
+                    semaphore.withPermit {
+                        currentCoroutineContext().ensureActive()
+                        val part = partFiles[index]
+                        val expected = if (index < urls.lastIndex) partSize else (request.size - partSize * index).coerceAtLeast(0)
+                        val targetUrl = chunkUrl(request, chunk)
 
-            var attempt = 0
-            while (true) {
-                try {
-                    if (targetUrl.contains("aula.uclv.edu.cu")) {
-                        if (!isSessionActive(targetUrl, request.fileName)) {
-                            authenticate(request)
+                        if (part.exists() && expected > 0 && part.length() >= expected) {
+                            progressMap[index] = part.length()
+                            val downloaded = progressMap.values.sum()
+                            update(request.fileName) { it.copy(downloadedBytes = downloaded, totalBytes = request.size) }
+                            return@withPermit
+                        }
+
+                        var attempt = 0
+                        while (true) {
+                            try {
+                                if (targetUrl.contains("aula.uclv.edu.cu")) {
+                                    if (!isSessionActive(targetUrl, request.fileName)) {
+                                        authenticate(request)
+                                    }
+                                }
+                                transfer(request, targetUrl, part, null, expected, gate) { bytes ->
+                                    progressMap[index] = bytes
+                                    val downloaded = progressMap.values.sum()
+                                    val now = System.nanoTime()
+                                    val elapsed = (now - lastTick) / 1_000_000_000.0
+                                    if (elapsed > 0.1) {
+                                        val instantBps = kotlin.math.max(0.0, (downloaded - lastBytes) / elapsed)
+                                        val alphaVel = 0.1
+                                        smoothedSpeed = if (smoothedSpeed == 0.0) instantBps else (smoothedSpeed * (1 - alphaVel)) + (instantBps * alphaVel)
+                                        lastBytes = downloaded
+                                        lastTick = now
+                                    }
+                                    if (smoothedSpeed > 1024 && request.size > downloaded) {
+                                        val remaining = (request.size - downloaded).toDouble()
+                                        val instantEta = remaining / smoothedSpeed
+                                        val alphaEta = 0.1
+                                        smoothedEta = if (smoothedEta == null) instantEta else (smoothedEta!! * (1 - alphaEta)) + (instantEta * alphaEta)
+                                    } else if (downloaded >= request.size) {
+                                        smoothedSpeed = 0.0
+                                        smoothedEta = null
+                                    }
+                                    update(request.fileName) {
+                                        it.copy(
+                                            downloadedBytes = downloaded,
+                                            totalBytes = request.size,
+                                            speedBytesPerSecond = smoothedSpeed,
+                                            etaSeconds = smoothedEta?.toLong(),
+                                        )
+                                    }
+                                }
+                                check(expected <= 0 || part.length() >= expected) { "Parte incompleta o corrupta" }
+                                break
+                            } catch (failure: Throwable) {
+                                if (failure is CancellationException) throw failure
+                                attempt++
+                                if (attempt >= 5) throw IllegalStateException("Error: Tras 5 intentos en la descarga", failure)
+                                update(request.fileName) { it.copy(state = DownloadState.DOWNLOADING, error = "Conexión perdida. Reintentando ($attempt/5): ${failure.message}") }
+                                retryConnection()
+                            }
                         }
                     }
-                    transfer(request, targetUrl, part, null, expected, gate) { bytes ->
-                        val downloaded = partFiles.take(index).sumOf(File::length) + bytes
-                        val now = System.nanoTime()
-                        val elapsed = (now - lastTick) / 1_000_000_000.0
-                        if (elapsed > 0.1) {
-                            val instantBps = kotlin.math.max(0.0, (downloaded - lastBytes) / elapsed)
-                            val alphaVel = 0.1
-                            smoothedSpeed = if (smoothedSpeed == 0.0) instantBps else (smoothedSpeed * (1 - alphaVel)) + (instantBps * alphaVel)
-                            lastBytes = downloaded
-                            lastTick = now
-                        }
-                        if (smoothedSpeed > 1024 && request.size > downloaded) {
-                            val remaining = (request.size - downloaded).toDouble()
-                            val instantEta = remaining / smoothedSpeed
-                            val alphaEta = 0.1
-                            smoothedEta = if (smoothedEta == null) instantEta else (smoothedEta!! * (1 - alphaEta)) + (instantEta * alphaEta)
-                        } else if (downloaded >= request.size) {
-                            smoothedSpeed = 0.0
-                            smoothedEta = null
-                        }
-                        update(request.fileName) {
-                            it.copy(
-                                downloadedBytes = downloaded,
-                                totalBytes = request.size,
-                                speedBytesPerSecond = smoothedSpeed,
-                                etaSeconds = smoothedEta?.toLong(),
-                            )
-                        }
-                    }
-                    check(expected <= 0 || part.length() >= expected) { "Parte incompleta o corrupta" }
-                    break
-                } catch (failure: Throwable) {
-                    if (failure is CancellationException) throw failure
-                    attempt++
-                    if (attempt >= 5) throw IllegalStateException("Error: Tras 5 intentos en la descarga", failure)
-                    update(request.fileName) { it.copy(state = DownloadState.DOWNLOADING, error = "Conexión perdida. Reintentando ($attempt/5): ${failure.message}") }
-                    retryConnection()
                 }
             }
         }
@@ -229,53 +246,171 @@ internal class DownloadEngine(
     }
 
     private suspend fun downloadTodus(request: DownloadRequest, url: String, file: File, gate: MutableStateFlow<Boolean>) {
-        var attempt = 0
-        var lastBytes = file.length()
-        var lastTick = System.nanoTime()
-        var smoothedSpeed = 0.0
-        var smoothedEta: Double? = null
+        val totalSize = request.size
+        val safeName = file.name
+        val partsDir = file.parentFile ?: return
+        if (totalSize > 4 * 1024 * 1024) {
+            val chunkCount = 4
+            val chunkSize = totalSize / chunkCount
+            val partFiles = (0 until chunkCount).map { File(partsDir, "$safeName.todus.part$it") }
+            val progressMap = ConcurrentHashMap<Int, Long>()
+            val semaphore = Semaphore(4)
+            var lastBytes = 0L
+            var lastTick = System.nanoTime()
+            var smoothedSpeed = 0.0
+            var smoothedEta: Double? = null
 
-        while (attempt < 5) {
-            try {
-                val offset = file.length().takeIf { it > 0 }
-                transfer(request, url, file, offset, request.size, gate) { bytes ->
-                    val now = System.nanoTime()
-                    val elapsed = (now - lastTick) / 1_000_000_000.0
-                    if (elapsed > 0.1) {
-                        val instantBps = kotlin.math.max(0.0, (bytes - lastBytes) / elapsed)
-                        val alphaVel = 0.1
-                        smoothedSpeed = if (smoothedSpeed == 0.0) instantBps else (smoothedSpeed * (1 - alphaVel)) + (instantBps * alphaVel)
-                        lastBytes = bytes
-                        lastTick = now
-                    }
-                    if (smoothedSpeed > 1024 && request.size > bytes) {
-                        val remaining = (request.size - bytes).toDouble()
-                        val instantEta = remaining / smoothedSpeed
-                        val alphaEta = 0.1
-                        smoothedEta = if (smoothedEta == null) instantEta else (smoothedEta!! * (1 - alphaEta)) + (instantEta * alphaEta)
-                    } else if (bytes >= request.size) {
-                        smoothedSpeed = 0.0
-                        smoothedEta = null
-                    }
-                    update(request.fileName) {
-                        it.copy(
-                            downloadedBytes = bytes,
-                            totalBytes = request.size,
-                            speedBytesPerSecond = smoothedSpeed,
-                            etaSeconds = smoothedEta?.toLong(),
-                        )
+            partFiles.forEachIndexed { i, part ->
+                if (part.exists()) progressMap[i] = part.length()
+            }
+
+            coroutineScope {
+                (0 until chunkCount).forEach { index ->
+                    launch(Dispatchers.IO) {
+                        semaphore.withPermit {
+                            val partFile = partFiles[index]
+                            val startByte = index * chunkSize
+                            val endByte = if (index == chunkCount - 1) totalSize - 1 else (index + 1) * chunkSize - 1
+                            val expectedPartSize = endByte - startByte + 1
+
+                            if (partFile.exists() && partFile.length() >= expectedPartSize) {
+                                progressMap[index] = partFile.length()
+                                return@withPermit
+                            }
+
+                            var attempt = 0
+                            while (attempt < 5) {
+                                try {
+                                    val currentOffset = startByte + partFile.length()
+                                    if (currentOffset > endByte) {
+                                        progressMap[index] = expectedPartSize
+                                        break
+                                    }
+
+                                    transferRange(request, url, partFile, currentOffset, endByte, expectedPartSize, gate) { bytesWritten ->
+                                        progressMap[index] = bytesWritten
+                                        val totalDownloaded = progressMap.values.sum()
+                                        val now = System.nanoTime()
+                                        val elapsed = (now - lastTick) / 1_000_000_000.0
+                                        if (elapsed > 0.1) {
+                                            val instantBps = kotlin.math.max(0.0, (totalDownloaded - lastBytes) / elapsed)
+                                            val alphaVel = 0.1
+                                            smoothedSpeed = if (smoothedSpeed == 0.0) instantBps else (smoothedSpeed * (1 - alphaVel)) + (instantBps * alphaVel)
+                                            lastBytes = totalDownloaded
+                                            lastTick = now
+                                        }
+                                        if (smoothedSpeed > 1024 && totalSize > totalDownloaded) {
+                                            val remaining = (totalSize - totalDownloaded).toDouble()
+                                            val instantEta = remaining / smoothedSpeed
+                                            val alphaEta = 0.1
+                                            smoothedEta = if (smoothedEta == null) instantEta else (smoothedEta!! * (1 - alphaEta)) + (instantEta * alphaEta)
+                                        } else if (totalDownloaded >= totalSize) {
+                                            smoothedSpeed = 0.0
+                                            smoothedEta = null
+                                        }
+                                        update(request.fileName) {
+                                            it.copy(
+                                                downloadedBytes = totalDownloaded,
+                                                totalBytes = totalSize,
+                                                speedBytesPerSecond = smoothedSpeed,
+                                                etaSeconds = smoothedEta?.toLong(),
+                                            )
+                                        }
+                                    }
+                                    check(partFile.length() >= expectedPartSize) { "Parte $index Todus incompleta" }
+                                    break
+                                } catch (failure: Throwable) {
+                                    if (failure is CancellationException) throw failure
+                                    attempt++
+                                    if (attempt >= 5) throw failure
+                                    retryConnection()
+                                }
+                            }
+                        }
                     }
                 }
-                check(request.size <= 0 || file.length() >= request.size) { "Descarga Todus incompleta" }
-                return
-            } catch (failure: Throwable) {
-                if (failure is CancellationException) throw failure
-                attempt++
-                if (attempt >= 5) throw IllegalStateException("Error: Tras 5 intentos en la descarga de Todus", failure)
-                update(request.fileName) { it.copy(state = DownloadState.DOWNLOADING, error = "Error en descarga Todus (intento $attempt/5): ${failure.message}") }
-                retryConnection()
+            }
+
+            file.outputStream().buffered().use { out ->
+                partFiles.forEach { part ->
+                    part.inputStream().buffered().use { it.copyTo(out) }
+                }
+            }
+            partFiles.forEach(File::delete)
+        } else {
+            var attempt = 0
+            var lastBytes = file.length()
+            var lastTick = System.nanoTime()
+            var smoothedSpeed = 0.0
+            var smoothedEta: Double? = null
+
+            while (attempt < 5) {
+                try {
+                    val offset = file.length().takeIf { it > 0 }
+                    transfer(request, url, file, offset, request.size, gate) { bytes ->
+                        val now = System.nanoTime()
+                        val elapsed = (now - lastTick) / 1_000_000_000.0
+                        if (elapsed > 0.1) {
+                            val instantBps = kotlin.math.max(0.0, (bytes - lastBytes) / elapsed)
+                            val alphaVel = 0.1
+                            smoothedSpeed = if (smoothedSpeed == 0.0) instantBps else (smoothedSpeed * (1 - alphaVel)) + (instantBps * alphaVel)
+                            lastBytes = bytes
+                            lastTick = now
+                        }
+                        if (smoothedSpeed > 1024 && request.size > bytes) {
+                            val remaining = (request.size - bytes).toDouble()
+                            val instantEta = remaining / smoothedSpeed
+                            val alphaEta = 0.1
+                            smoothedEta = if (smoothedEta == null) instantEta else (smoothedEta!! * (1 - alphaEta)) + (instantEta * alphaEta)
+                        } else if (bytes >= request.size) {
+                            smoothedSpeed = 0.0
+                            smoothedEta = null
+                        }
+                        update(request.fileName) {
+                            it.copy(
+                                downloadedBytes = bytes,
+                                totalBytes = request.size,
+                                speedBytesPerSecond = smoothedSpeed,
+                                etaSeconds = smoothedEta?.toLong(),
+                            )
+                        }
+                    }
+                    check(request.size <= 0 || file.length() >= request.size) { "Descarga Todus incompleta" }
+                    return
+                } catch (failure: Throwable) {
+                    if (failure is CancellationException) throw failure
+                    attempt++
+                    if (attempt >= 5) throw IllegalStateException("Error: Tras 5 intentos en la descarga de Todus", failure)
+                    update(request.fileName) { it.copy(state = DownloadState.DOWNLOADING, error = "Error en descarga Todus (intento $attempt/5): ${failure.message}") }
+                    retryConnection()
+                }
             }
         }
+    }
+
+    private suspend fun transferRange(request: DownloadRequest, url: String, file: File, rangeStart: Long, rangeEnd: Long, expected: Long, gate: MutableStateFlow<Boolean>, progress: (Long) -> Unit) {
+        val target = if (request.method == "todus") url.toHttpUrl().newBuilder().scheme("https").host("s3.todus.cu").port(443).build() else url.toHttpUrl()
+        val builder = Request.Builder().url(target).header("User-Agent", USER_AGENT)
+        builder.header("Range", "bytes=$rangeStart-$rangeEnd")
+        client.newCall(builder.build()).execute().use { response ->
+            if (response.code == 416) return
+            validateResponse(response)
+            val append = file.exists() && file.length() > 0
+            RandomAccessFile(file, "rw").use { output ->
+                if (append) output.seek(output.length()) else output.setLength(0)
+                val input = response.body?.byteStream() ?: error("Respuesta vacía")
+                val buffer = ByteArray(8192)
+                while (true) {
+                    currentCoroutineContext().ensureActive()
+                    gate.first { it }
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    output.write(buffer, 0, count)
+                    progress(output.length())
+                }
+            }
+        }
+        check(expected <= 0 || file.length() >= expected) { "Descarga de rango incompleta" }
     }
 
     private suspend fun transfer(request: DownloadRequest, url: String, file: File, rangeStart: Long?, expected: Long, gate: MutableStateFlow<Boolean>, progress: (Long) -> Unit) {
