@@ -1,7 +1,61 @@
+# Built application files and packaging outputs
+*.apk
+*.aar
+*.ap_
+*.aab
+**/release/
+**/debug/
+
+# Files for the ART/Dalvik VM
+*.dex
+
+# Java class files
+*.class
+
+# Generated files
+bin/
+gen/
+out/
+
+# Gradle files & caches
 .gradle/
 build/
+**/build/
+
+# Local configuration file (sdk path, etc)
 local.properties
+
+# Log files
+*.log
+
+# Android Studio temporary files & caches
+captures/
+.navigation/
+.cxx/
+.externalNativeBuild/
+
+# IntelliJ IDEA / Android Studio project files
 *.iml
 .idea/
+.idea/workspace.xml
+.idea/caches/
+.idea/libraries/
+.idea/modules.xml
+.idea/assetWizardSettings.xml
+
+# Keystore files (claves de firma privadas)
+*.jks
+*.keystore
+
+# Kotlin compilation cache
+.kotlin/
+*.kotlin_module
+
+# OS generated files
 .DS_Store
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# ZCode / Agent workspace files
 .zcode/
