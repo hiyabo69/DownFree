@@ -72,3 +72,10 @@ jobs:
           token: ${{ secrets.TOKEN || secrets.GITHUB_TOKEN }}
         env:
           GITHUB_TOKEN: ${{ secrets.TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Clean up Workspace and Keystore
+        if: always()
+        run: |
+          rm -f app/release.keystore
+          rm -f "DownFree-${GITHUB_REF_NAME}.apk"
+          rm -rf app/build
